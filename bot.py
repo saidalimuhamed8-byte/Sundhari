@@ -1,10 +1,15 @@
 import os
+from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler
 
-# Get token from environment
+# Load environment variables
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Start command
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN not set. Please add it as an environment variable.")
+
+# Command handler
 async def start(update, context):
     await update.message.reply_text("Welcome to സുന്ദരി 🔞 bot")
 
