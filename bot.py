@@ -47,17 +47,12 @@ application.add_handler(CommandHandler("start", start_command))
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook_handler():
     """Handle incoming Telegram updates via webhook."""
-    # Check for the correct content type.
-    if request.is_json:
-        # Parse the JSON payload from the Telegram request.
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        # Put the update into the bot's queue for processing.
-        application.update_queue.put(update)
-        logger.info("Received and queued an update from Telegram.")
-        return "ok"
-    else:
-        logger.warning("Received a non-JSON request to the webhook endpoint.")
-        return "Bad Request", 400
+    # Parse the JSON payload from the Telegram request.
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    # The application processes the update directly.
+    application.process_update(update)
+    logger.info("Received and processed an update from Telegram.")
+    return "ok"
 
 # This is the root route for health checks.
 # Koyeb's health checks will send requests to this URL to ensure the service is running.
@@ -67,11 +62,6 @@ def index_handler():
     return "Bot is running!"
 
 if __name__ == "__main__":
-    # Start the bot's application in a non-blocking way to allow Flask to handle webhooks.
-    # This is crucial for running a bot on a platform like Koyeb.
-    # It processes updates from the queue.
-    application.run_in_background()
-
     # Get the port from the environment variable provided by Koyeb.
     PORT = int(os.environ.get("PORT", 8080))
     
