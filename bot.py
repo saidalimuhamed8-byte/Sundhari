@@ -3,8 +3,8 @@ from flask import Flask, request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
-WEBHOOK_URL = "https://<your-app-name>.koyeb.app/"  # Replace with your Koyeb app URL
+TOKEN = "8224276236:AAFqXBAGkD7jTv5f7Y-kiUztO82jo0W3mB0"
+WEBHOOK_URL = "https://naughty-suzette-sasis-fdd9317b.koyeb.app/"  # Replace with your Koyeb app URL
 
 VIDEOS = {
     "mallu": ["videos/mallu1.mp4", "videos/mallu2.mp4", "..."],
