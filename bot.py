@@ -1,24 +1,16 @@
-# This script is a modified version of the Telegram bot that uses a webhook
-# instead of long polling. This is required for deployment environments
-# that rely on a public port and health checks.
-
 import os
-import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Environment Variables ---
-# The bot token is retrieved from environment variables for security.
 TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+PORT = int(os.environ.get("PORT", 8000))
+
 if not TOKEN:
     raise ValueError("BOT_TOKEN not set in environment variables")
-
-# Webhook URL and port are required for a webhook setup.
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL not set in environment variables")
-
-PORT = int(os.environ.get("PORT", "8080"))
 
 # --- Video links ---
 VIDEOS = {
@@ -42,7 +34,7 @@ PAGE_SIZE = 1
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a message with inline keyboard to choose a category."""
+    """Sends a welcome message and a menu of video categories."""
     keyboard = [
         [
             InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
@@ -60,12 +52,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button presses and sends the appropriate video batch."""
+    """Handles button presses and sends the corresponding videos."""
     query = update.callback_query
     await query.answer()
 
-    category, page = query.data.split(":")
-    page = int(page)
+    # Extract category and page from the callback data
+    try:
+        category, page_str = query.data.split(":")
+        page = int(page_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ Invalid button data.")
+        return
+
     videos = VIDEOS.get(category, [])
 
     start_idx = page * PAGE_SIZE
@@ -73,51 +71,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     batch = videos[start_idx:end_idx]
 
     if not batch:
-        await query.edit_message_text("❌ No more videos.")
+        try:
+            await query.edit_message_text("❌ No more videos in this category.")
+        except Exception as e:
+            print(f"Failed to edit message: {e}")
         return
 
     media = [InputMediaVideo(url) for url in batch]
 
-    if media:
-        try:
-            await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
-        except Exception as e:
-            await query.message.reply_text(f"⚠️ Failed to send videos: {e}")
+    # Use a new reply_text message for the videos
+    await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
+    # Navigation buttons
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
     if end_idx < len(videos):
         buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"{category}:{page+1}"))
 
-    if buttons:
-        nav_markup = InlineKeyboardMarkup([buttons])
-        try:
-            await query.edit_message_text("Navigate:", reply_markup=nav_markup)
-        except Exception:
-            # Handle the case where the message can't be edited.
-            pass
+    try:
+        if buttons:
+            nav_markup = InlineKeyboardMarkup([buttons])
+            await query.message.reply_text("Navigate:", reply_markup=nav_markup)
+        else:
+            await query.message.reply_text("End of videos.")
+    except Exception as e:
+        print(f"Failed to send navigation buttons: {e}")
 
 # --- Telegram Bot Application ---
 def main():
-    """Initializes and runs the Telegram bot using a webhook."""
-    # Enable logging for debugging.
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-    )
-
+    """Initializes and runs the bot using a webhook."""
+    # Ensure URL and PORT are correctly set in the environment
+    webhook_url_path = TOKEN
+    
     bot_app = ApplicationBuilder().token(TOKEN).build()
-
-    # Add handlers to the application.
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Run the webhook on the specified port.
-    # The webhook URL is set via environment variables.
-    bot_app.run_webhook(listen="0.0.0.0",
-                        port=PORT,
-                        url_path=TOKEN,
-                        webhook_url=WEBHOOK_URL)
+    # Set up the webhook
+    bot_app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_url_path,
+        webhook_url=f"{WEBHOOK_URL}/{webhook_url_path}"
+    )
 
 if __name__ == "__main__":
     main()
