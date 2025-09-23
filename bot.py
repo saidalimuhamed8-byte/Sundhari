@@ -7,6 +7,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     ChatMemberHandler,
+    MessageHandler,
+    filters
 )
 
 # --- Environment Variables ---
@@ -99,6 +101,9 @@ async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     except Exception as e:
         print(f"Failed to send log message: {e}")
 
+# --- Two-step video upload storage ---
+pending_videos = {}  # key=user_id, value=category
+
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -171,6 +176,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.message.reply_text("End of videos.")
 
+# --- Admin commands ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
@@ -192,15 +198,23 @@ async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ You are not authorized to add videos.")
         return
 
-    if not update.message.video:
-        await update.message.reply_text("📥 Please send a video file with the command.")
-        return
-
     if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage: /addvideo <category>")
+        await update.message.reply_text("⚠️ Usage: /addvideo <category>\nThen send the video file.")
         return
 
     category = context.args[0].lower()
+    pending_videos[user_id] = category
+    await update.message.reply_text(f"📥 Now send the video file to add it to category: *{category}*", parse_mode="Markdown")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    if user_id not in pending_videos:
+        return
+
+    category = pending_videos.pop(user_id)
     file_id = update.message.video.file_id
 
     conn = sqlite3.connect(DB_FILE)
@@ -209,7 +223,7 @@ async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ Video saved to category: *{category}*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Video added to category: *{category}*", parse_mode="Markdown")
 
 async def listvideos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -233,6 +247,75 @@ async def listvideos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+# --- Remove video command ---
+async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text("⚠️ Usage: /removevideo <category> <video_number>")
+        return
+
+    category = context.args[0].lower()
+    try:
+        video_number = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("⚠️ Video number must be an integer.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
+    videos = cursor.fetchall()
+
+    if not videos:
+        await update.message.reply_text(f"❌ No videos found in category *{category}*.", parse_mode="Markdown")
+        conn.close()
+        return
+
+    if video_number < 1 or video_number > len(videos):
+        await update.message.reply_text(f"❌ Invalid video number. There are {len(videos)} videos in this category.", parse_mode="Markdown")
+        conn.close()
+        return
+
+    video_id_to_remove = videos[video_number - 1][0]
+    cursor.execute("DELETE FROM videos WHERE id=?", (video_id_to_remove,))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Video #{video_number} removed from category *{category}*", parse_mode="Markdown")
+
+# --- List videos in a category ---
+async def listcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage: /listcategory <category>")
+        return
+
+    category = context.args[0].lower()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
+    videos = cursor.fetchall()
+    conn.close()
+
+    if not videos:
+        await update.message.reply_text(f"ℹ️ No videos found in category *{category}*.", parse_mode="Markdown")
+        return
+
+    msg = f"📂 *Videos in category {category}:*\n"
+    for idx, (vid_id, file_id) in enumerate(videos, start=1):
+        msg += f"{idx}. `{file_id}`\n"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# --- Chat member tracking ---
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
@@ -260,19 +343,30 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await log_to_channel(context, log_text)
 
-# --- Telegram Bot Application ---
+# --- Main bot ---
 def main():
     init_db()
     webhook_url_path = TOKEN
     bot_app = ApplicationBuilder().token(TOKEN).build()
 
+    # Command handlers
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CallbackQueryHandler(button_handler))
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("addvideo", addvideo))
     bot_app.add_handler(CommandHandler("listvideos", listvideos))
+    bot_app.add_handler(CommandHandler("removevideo", removevideo))
+    bot_app.add_handler(CommandHandler("listcategory", listcategory))
+
+    # Callback buttons
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Chat member tracking
     bot_app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
+    # Video upload handler
+    bot_app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+
+    # Run webhook
     bot_app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
