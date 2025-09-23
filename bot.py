@@ -20,8 +20,8 @@ if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL not set in environment variables")
 
 # --- Admin Config ---
-ADMIN_IDS = [123456789]  # 👈 replace with your Telegram user ID
-LOG_CHANNEL_ID = -1001234567890  # 👈 replace with your log channel ID
+ADMIN_IDS = [8301447343]  # 👈 replace with your Telegram user ID
+LOG_CHANNEL_ID = -1002871565651  # 👈 replace with your log channel ID
 
 # --- SQLite Database ---
 DB_FILE = "bot_data.db"
