@@ -5,6 +5,13 @@ from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# --- Environment Variables ---
+TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-koyeb-app.com
+
+if not TOKEN or not WEBHOOK_URL:
+    raise ValueError("BOT_TOKEN or WEBHOOK_URL not set in environment variables")
+
 # --- Video links ---
 VIDEOS = {
     "mallu": [
@@ -25,12 +32,7 @@ VIDEOS = {
 
 PAGE_SIZE = 10
 
-TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://mybot.koyeb.app
-
-if not TOKEN or not WEBHOOK_URL:
-    raise ValueError("BOT_TOKEN or WEBHOOK_URL not set")
-
+# --- Telegram Bot Application ---
 bot_app = ApplicationBuilder().token(TOKEN).build()
 
 # --- Handlers ---
@@ -84,12 +86,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nav_markup = InlineKeyboardMarkup([buttons])
         await query.edit_message_text("Navigate:", reply_markup=nav_markup)
 
-# --- FastAPI app with lifespan ---
+# --- FastAPI Lifespan for Koyeb ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Set webhook
+    # Set webhook on startup
     await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
-    # Start background task to process updates
+    # Start bot processing in background
     asyncio.create_task(bot_app.start())
     yield
     # Shutdown bot on exit
@@ -98,7 +100,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- Webhook endpoint ---
+# --- Webhook Endpoint ---
 @app.post(f"/webhook/{TOKEN}")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -107,16 +109,11 @@ async def telegram_webhook(request: Request):
     await bot_app.process_updates()
     return {"ok": True}
 
-# --- Health check ---
+# --- Health Check Endpoint ---
 @app.get("/")
 async def health():
     return {"status": "ok"}
 
-# --- Add handlers ---
+# --- Add Telegram Handlers ---
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CallbackQueryHandler(button_handler))
-
-# --- Run with uvicorn ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
