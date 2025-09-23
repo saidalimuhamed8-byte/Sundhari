@@ -1,5 +1,4 @@
 import os
-import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
@@ -86,17 +85,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nav_markup = InlineKeyboardMarkup([buttons])
         await query.edit_message_text("Navigate:", reply_markup=nav_markup)
 
-# --- FastAPI Lifespan for Koyeb ---
+# --- FastAPI Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Set webhook on startup
     await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
-    # Start bot processing in background
-    asyncio.create_task(bot_app.start())
     yield
-    # Shutdown bot on exit
-    await bot_app.stop()
-    await bot_app.shutdown()
+    # Remove webhook on shutdown
+    await bot_app.bot.delete_webhook()
 
 app = FastAPI(lifespan=lifespan)
 
