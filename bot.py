@@ -24,6 +24,8 @@ if not WEBHOOK_URL:
 # --- Admin & Log Config ---
 ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
 LOG_CHANNEL_ID = -1002871565651  # Replace with your log channel ID
+FORCE_JOIN_GROUP_ID = -4874608248  # Replace with your Telegram group ID
+FORCE_JOIN_LINK = "https://t.me/+5BSe0PADOHZmYjY1"  # Replace with your group invite link
 
 # --- SQLite Database ---
 DB_FILE = "bot_data.db"
@@ -101,32 +103,38 @@ async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     except Exception as e:
         print(f"Failed to send log message: {e}")
 
-# --- Two-step video upload storage ---
+# --- Force-join check ---
+async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(chat_id=FORCE_JOIN_GROUP_ID, user_id=user_id)
+        if member.status in ("member", "administrator", "creator"):
+            return True
+    except Exception as e:
+        print(f"Error checking membership: {e}")
+    await update.message.reply_text(
+        f"⛔ You must join our [group]({FORCE_JOIN_LINK}) to access videos!",
+        parse_mode="Markdown"
+    )
+    return False
+
+# --- Video upload storage ---
 pending_videos = {}  # key=user_id, value=category
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_membership(update, context):
+        return
+
     chat = update.effective_chat
     add_chat(chat.id, chat.type, getattr(chat, 'first_name', None), getattr(chat, 'username', None))
 
     users, groups = get_active_counts()
-
-    if chat.type == "private":
-        log_text = (
-            f"👤 *New user started bot:*\n"
-            f"ID: `{chat.id}`\n"
-            f"Name: {chat.first_name}\n"
-            f"Username: @{chat.username or 'N/A'}\n\n"
-            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
-        )
-    else:
-        log_text = (
-            f"👥 *Bot used in group:*\n"
-            f"ID: `{chat.id}`\n"
-            f"Title: {chat.title}\n\n"
-            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
-        )
-
+    log_text = (
+        f"👤 New user started bot:\nID: `{chat.id}`\n"
+        f"Name: {chat.first_name}\nUsername: @{chat.username or 'N/A'}\n\n"
+        f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+    )
     await log_to_channel(context, log_text)
 
     keyboard = [
@@ -137,13 +145,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 Welcome to സുന്ദരി 🔞 bot! Choose a category:",
+        "👋 Welcome! Choose a category:",
         reply_markup=reply_markup
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Force join check
+    fake_update = Update(update.update_id, message=query.message)  # simulate Update for check
+    if not await check_membership(fake_update, context):
+        return
 
     try:
         category, page_str = query.data.split(":")
@@ -153,7 +166,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     videos = get_videos(category)
-    start_idx = page * 1  # PAGE_SIZE = 1
+    start_idx = page * 1
     end_idx = start_idx + 1
     batch = videos[start_idx:end_idx]
 
@@ -178,13 +191,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Admin commands ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
         return
-
     stats = get_chat_stats()
-    msg = "📊 *Bot Usage Stats:*\n"
+    msg = "📊 Bot Usage Stats:\n"
     for chat_type, count in stats:
         if chat_type == "private":
             msg += f"👤 Users: {count}\n"
@@ -193,154 +204,120 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to add videos.")
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
         return
-
     if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage: /addvideo <category>\nThen send the video file.")
+        await update.message.reply_text("Usage: /addvideo <category>")
         return
-
     category = context.args[0].lower()
-    pending_videos[user_id] = category
-    await update.message.reply_text(f"📥 Now send the video file to add it to category: *{category}*", parse_mode="Markdown")
+    pending_videos[update.effective_user.id] = category
+    await update.message.reply_text(f"Send the video to add to category: {category}")
+
+async def bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /bulkadd <category>")
+        return
+    category = context.args[0].lower()
+    pending_videos[update.effective_user.id] = category
+    await update.message.reply_text(f"Send multiple videos as an album to add to category: {category}")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+    if update.effective_user.id not in ADMIN_IDS:
         return
-
+    user_id = update.effective_user.id
     if user_id not in pending_videos:
         return
-
-    category = pending_videos.pop(user_id)
-    file_id = update.message.video.file_id
-
+    category = pending_videos[user_id]
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO videos (category, file_id) VALUES (?, ?)", (category, file_id))
+    cursor.execute("INSERT INTO videos (category, file_id) VALUES (?, ?)", (category, update.message.video.file_id))
     conn.commit()
     conn.close()
-
-    await update.message.reply_text(f"✅ Video added to category: *{category}*", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Video added to category: {category}")
 
 async def listvideos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
         return
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT category, COUNT(*) FROM videos GROUP BY category")
     stats = cursor.fetchall()
     conn.close()
-
     if not stats:
-        await update.message.reply_text("ℹ️ No videos have been added yet.")
+        await update.message.reply_text("No videos added yet.")
         return
-
-    msg = "📂 *Video Categories:*\n"
+    msg = "📂 Video Categories:\n"
     for category, count in stats:
-        msg += f"• {category.capitalize()}: {count} videos\n"
+        msg += f"• {category}: {count} videos\n"
+    await update.message.reply_text(msg)
 
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# --- Remove video command ---
-async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
+async def listcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
         return
-
-    if len(context.args) != 2:
-        await update.message.reply_text("⚠️ Usage: /removevideo <category> <video_number>")
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /listcategory <category>")
         return
-
     category = context.args[0].lower()
-    try:
-        video_number = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("⚠️ Video number must be an integer.")
-        return
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT id, file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
     videos = cursor.fetchall()
-
+    conn.close()
     if not videos:
-        await update.message.reply_text(f"❌ No videos found in category *{category}*.", parse_mode="Markdown")
+        await update.message.reply_text(f"No videos in category {category}")
+        return
+    msg = f"📂 Videos in {category}:\n"
+    for idx, (vid_id, file_id) in enumerate(videos, start=1):
+        msg += f"{idx}. `{file_id}`\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /removevideo <category> <video_number>")
+        return
+    category = context.args[0].lower()
+    try:
+        video_number = int(context.args[1])
+    except:
+        await update.message.reply_text("Video number must be an integer")
+        return
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM videos WHERE category=? ORDER BY id ASC", (category,))
+    videos = cursor.fetchall()
+    if not videos or video_number < 1 or video_number > len(videos):
+        await update.message.reply_text("Invalid video number")
         conn.close()
         return
-
-    if video_number < 1 or video_number > len(videos):
-        await update.message.reply_text(f"❌ Invalid video number. There are {len(videos)} videos in this category.", parse_mode="Markdown")
-        conn.close()
-        return
-
     video_id_to_remove = videos[video_number - 1][0]
     cursor.execute("DELETE FROM videos WHERE id=?", (video_id_to_remove,))
     conn.commit()
     conn.close()
+    await update.message.reply_text(f"✅ Removed video #{video_number} from {category}")
 
-    await update.message.reply_text(f"✅ Video #{video_number} removed from category *{category}*", parse_mode="Markdown")
-
-# --- List videos in a category ---
-async def listcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ You are not authorized to use this command.")
-        return
-
-    if len(context.args) != 1:
-        await update.message.reply_text("⚠️ Usage: /listcategory <category>")
-        return
-
-    category = context.args[0].lower()
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
-    videos = cursor.fetchall()
-    conn.close()
-
-    if not videos:
-        await update.message.reply_text(f"ℹ️ No videos found in category *{category}*.", parse_mode="Markdown")
-        return
-
-    msg = f"📂 *Videos in category {category}:*\n"
-    for idx, (vid_id, file_id) in enumerate(videos, start=1):
-        msg += f"{idx}. `{file_id}`\n"
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# --- Chat member tracking ---
+# --- Chat member updates ---
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
-
     if status in ("member", "administrator"):
         add_chat(chat.id, chat.type, getattr(chat, 'title', None), None)
         update_chat_status(chat.id, 1)
         users, groups = get_active_counts()
-        log_text = (
-            f"✅ *Bot added to group:*\n"
-            f"ID: `{chat.id}`\n"
-            f"Title: {chat.title}\n\n"
-            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
-        )
+        log_text = f"✅ Bot added to group: {chat.title}\nID: `{chat.id}`\nNow: 👤 {users} users | 👥 {groups} groups"
         await log_to_channel(context, log_text)
-
     elif status in ("left", "kicked"):
         update_chat_status(chat.id, 0)
         users, groups = get_active_counts()
-        log_text = (
-            f"❌ *Bot removed from group:*\n"
-            f"ID: `{chat.id}`\n"
-            f"Title: {chat.title}\n\n"
-            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
-        )
+        log_text = f"❌ Bot removed from group: {chat.title}\nID: `{chat.id}`\nNow: 👤 {users} users | 👥 {groups} groups"
         await log_to_channel(context, log_text)
 
 # --- Main bot ---
@@ -348,25 +325,16 @@ def main():
     init_db()
     webhook_url_path = TOKEN
     bot_app = ApplicationBuilder().token(TOKEN).build()
-
-    # Command handlers
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("addvideo", addvideo))
+    bot_app.add_handler(CommandHandler("bulkadd", bulkadd))
     bot_app.add_handler(CommandHandler("listvideos", listvideos))
-    bot_app.add_handler(CommandHandler("removevideo", removevideo))
     bot_app.add_handler(CommandHandler("listcategory", listcategory))
-
-    # Callback buttons
+    bot_app.add_handler(CommandHandler("removevideo", removevideo))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Chat member tracking
     bot_app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
-
-    # Video upload handler
     bot_app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-
-    # Run webhook
     bot_app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
