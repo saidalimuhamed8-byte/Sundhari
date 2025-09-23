@@ -1,70 +1,83 @@
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- Define videos for each button ---
-VIDEOS = {
-    "mallu": [
-        "https://example.com/mallu1.mp4",
-        "https://example.com/mallu2.mp4"
-    ],
-    "latest": [
-        "https://example.com/latest1.mp4",
-        "https://example.com/latest2.mp4"
-    ],
-    "desi": [
-        "https://example.com/desi1.mp4",
-        "https://example.com/desi2.mp4"
-    ],
-    "trending": [
-        "https://example.com/trending1.mp4",
-        "https://example.com/trending2.mp4"
-    ]
-}
+TOKEN = "YOUR_BOT_TOKEN_HERE"
+WEBHOOK_URL = "https://<your-app-name>.koyeb.app/"  # Replace with your Koyeb app URL
 
-# --- /start handler ---
+VIDEOS = {
+    "mallu": ["videos/mallu1.mp4", "videos/mallu2.mp4", "..."],
+    "latest": ["videos/latest1.mp4", "videos/latest2.mp4", "..."],
+    "desi": ["videos/desi1.mp4", "..."],
+    "trending": ["videos/trending1.mp4", "..."]
+}
+PAGE_SIZE = 10
+
+# --- Telegram Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [
-            InlineKeyboardButton("Mallu 🎥", callback_data="mallu"),
-            InlineKeyboardButton("Latest 🔥", callback_data="latest"),
-        ],
-        [
-            InlineKeyboardButton("Desi 🇮🇳", callback_data="desi"),
-            InlineKeyboardButton("Trending 📈", callback_data="trending"),
-        ]
+        [InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
+         InlineKeyboardButton("🆕 Latest", callback_data="latest:0")],
+        [InlineKeyboardButton("🇮🇳 Desi", callback_data="desi:0"),
+         InlineKeyboardButton("🔥 Trending", callback_data="trending:0")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "👋 Welcome to സുന്ദരി 🔞 bot!\n\nChoose a category below:",
+        "👋 Welcome to സുന്ദരി 🔞 bot! Choose a category to see videos:",
         reply_markup=reply_markup
     )
 
-# --- Button press handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data.split(":")
+    category = data[0]
+    page = int(data[1]) if len(data) > 1 else 0
 
-    category = query.data
     videos = VIDEOS.get(category, [])
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    batch = videos[start:end]
 
-    if videos:
-        await query.message.reply_text(f"📂 Sending {category.title()} videos...")
-        for video_url in videos:
-            await context.bot.send_video(chat_id=query.message.chat_id, video=video_url)
-    else:
-        await query.message.reply_text("❌ No videos available for this category.")
+    if not batch:
+        await query.message.reply_text("❌ No videos available.")
+        return
 
-# --- Main ---
-def main():
-    bot_token = os.getenv("BOT_TOKEN")  # set BOT_TOKEN in your Koyeb env
-    application = Application.builder().token(bot_token).build()
+    media = [InputMediaVideo(video) for video in batch]
+    await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
+    if end < len(videos):
+        buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"{category}:{page+1}"))
 
-    application.run_polling()
+    if buttons:
+        nav_markup = InlineKeyboardMarkup([buttons])
+        await query.message.reply_text("Navigate:", reply_markup=nav_markup)
+
+# --- Flask App ---
+flask_app = Flask(__name__)
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(button_handler))
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+@flask_app.route('/', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), app.bot)
+    app.create_task(app.update_queue.put(update))
+    return "OK", 200
 
 if __name__ == "__main__":
-    main()
+    # Set the webhook before running Flask
+    import asyncio
+    async def set_webhook():
+        await app.bot.set_webhook(WEBHOOK_URL)
+    asyncio.run(set_webhook())
+
+    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
