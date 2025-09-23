@@ -19,9 +19,9 @@ if not TOKEN:
 if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL not set in environment variables")
 
-# --- Admin Config ---
-ADMIN_IDS = [8301447343]  # 👈 replace with your Telegram user ID
-LOG_CHANNEL_ID = -1002871565651  # 👈 replace with your log channel ID
+# --- Admin & Log Config ---
+ADMIN_IDS = [123456789]  # Replace with your Telegram user ID
+LOG_CHANNEL_ID = -1001234567890  # Replace with your log channel ID
 
 # --- SQLite Database ---
 DB_FILE = "bot_data.db"
@@ -37,6 +37,13 @@ def init_db():
             username TEXT,
             is_active INTEGER DEFAULT 1,
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS videos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT,
+            file_id TEXT
         )
     """)
     conn.commit()
@@ -77,22 +84,20 @@ def get_active_counts():
     groups = stats.get("group", 0) + stats.get("supergroup", 0)
     return users, groups
 
-# --- Utility: Logging ---
+def get_videos(category):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
+    results = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return results
+
+# --- Logging Utility ---
 async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     try:
         await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print(f"Failed to send log message: {e}")
-
-# --- Video links ---
-VIDEOS = {
-    "mallu": ["https://example.com/videos/mallu1.mp4", "https://example.com/videos/mallu2.mp4"],
-    "latest": ["https://example.com/videos/latest1.mp4", "https://example.com/videos/latest2.mp4"],
-    "desi": ["https://example.com/videos/desi1.mp4"],
-    "trending": ["https://example.com/videos/trending1.mp4"]
-}
-
-PAGE_SIZE = 1
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,19 +147,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Invalid button data.")
         return
 
-    videos = VIDEOS.get(category, [])
-    start_idx = page * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
+    videos = get_videos(category)
+    start_idx = page * 1  # PAGE_SIZE = 1
+    end_idx = start_idx + 1
     batch = videos[start_idx:end_idx]
 
     if not batch:
-        try:
-            await query.edit_message_text("❌ No more videos in this category.")
-        except Exception as e:
-            print(f"Failed to edit message: {e}")
+        await query.edit_message_text("❌ No more videos in this category.")
         return
 
-    media = [InputMediaVideo(url) for url in batch]
+    media = [InputMediaVideo(file_id) for file_id in batch]
     await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
     buttons = []
@@ -163,14 +165,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if end_idx < len(videos):
         buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"{category}:{page+1}"))
 
-    try:
-        if buttons:
-            nav_markup = InlineKeyboardMarkup([buttons])
-            await query.message.reply_text("Navigate:", reply_markup=nav_markup)
-        else:
-            await query.message.reply_text("End of videos.")
-    except Exception as e:
-        print(f"Failed to send navigation buttons: {e}")
+    if buttons:
+        nav_markup = InlineKeyboardMarkup([buttons])
+        await query.message.reply_text("Navigate:", reply_markup=nav_markup)
+    else:
+        await query.message.reply_text("End of videos.")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -185,6 +184,53 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"👤 Users: {count}\n"
         elif chat_type in ("group", "supergroup"):
             msg += f"👥 Groups: {count}\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to add videos.")
+        return
+
+    if not update.message.video:
+        await update.message.reply_text("📥 Please send a video file with the command.")
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text("⚠️ Usage: /addvideo <category>")
+        return
+
+    category = context.args[0].lower()
+    file_id = update.message.video.file_id
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO videos (category, file_id) VALUES (?, ?)", (category, file_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Video saved to category: *{category}*", parse_mode="Markdown")
+
+async def listvideos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category, COUNT(*) FROM videos GROUP BY category")
+    stats = cursor.fetchall()
+    conn.close()
+
+    if not stats:
+        await update.message.reply_text("ℹ️ No videos have been added yet.")
+        return
+
+    msg = "📂 *Video Categories:*\n"
+    for category, count in stats:
+        msg += f"• {category.capitalize()}: {count} videos\n"
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,6 +269,8 @@ def main():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
     bot_app.add_handler(CommandHandler("stats", stats))
+    bot_app.add_handler(CommandHandler("addvideo", addvideo))
+    bot_app.add_handler(CommandHandler("listvideos", listvideos))
     bot_app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
     bot_app.run_webhook(
