@@ -1,7 +1,8 @@
 import os
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Video links ---
 VIDEOS = {
@@ -24,15 +25,15 @@ VIDEOS = {
 PAGE_SIZE = 10
 
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Your Koyeb HTTPS domain
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://mybot.koyeb.app
 
 if not TOKEN or not WEBHOOK_URL:
-    raise ValueError("BOT_TOKEN or WEBHOOK_URL not set")
+    raise ValueError("BOT_TOKEN or WEBHOOK_URL not set in environment variables")
 
 app = FastAPI()
 bot_app = ApplicationBuilder().token(TOKEN).build()
 
-# --- /start command ---
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -50,11 +51,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# --- Button handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     category, page = query.data.split(":")
     page = int(page)
     videos = VIDEOS.get(category, [])
@@ -95,24 +94,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, bot_app.bot)
-    await bot_app.update_queue.put(update)  # Use Application's queue
-    await bot_app.process_updates()          # Process pending updates
+    await bot_app.update_queue.put(update)
+    await bot_app.process_updates()
     return {"ok": True}
-
-# --- Setup handlers ---
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(button_handler))
-
-# --- Startup event: set webhook ---
-@app.on_event("startup")
-async def on_startup():
-    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
-    print(f"Webhook set to {WEBHOOK_URL}/webhook/{TOKEN}")
 
 # --- Health check ---
 @app.get("/")
 async def health():
     return {"status": "ok"}
+
+# --- Add handlers ---
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CallbackQueryHandler(button_handler))
+
+# --- Lifespan event to set webhook ---
+@app.on_event("startup")
+async def on_startup():
+    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
+    print(f"Webhook set to {WEBHOOK_URL}/webhook/{TOKEN}")
+    # Start bot polling loop in background to process updates
+    asyncio.create_task(bot_app.start())
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot_app.stop()
+    await bot_app.shutdown()
 
 # --- Run with uvicorn ---
 if __name__ == "__main__":
