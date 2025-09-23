@@ -1,83 +1,76 @@
-import os
-import asyncio
-import logging
-from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, ContextTypes, CommandHandler
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ---------------------------
-# Configuration
-# ---------------------------
-TOKEN = os.environ.get("BOT_TOKEN")  # Set your bot token in environment
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Set your full webhook URL in environment
+# Example video paths
+VIDEOS = {
+    "mallu": ["videos/mallu1.mp4", "videos/mallu2.mp4", "videos/mallu3.mp4", "..."], 
+    "latest": ["videos/latest1.mp4", "videos/latest2.mp4", "..."],
+    "desi": ["videos/desi1.mp4", "..."],
+    "trending": ["videos/trending1.mp4", "..."]
+}
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+PAGE_SIZE = 10  # Videos per album
 
-# ---------------------------
-# Create Telegram Bot Application
-# ---------------------------
-app_bot = Application.builder().token(TOKEN).build()
-
-# ---------------------------
-# Example Command Handler
-# ---------------------------
+# --- /start handler ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! Bot is running.")
+    keyboard = [
+        [
+            InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
+            InlineKeyboardButton("🆕 Latest", callback_data="latest:0")
+        ],
+        [
+            InlineKeyboardButton("🇮🇳 Desi", callback_data="desi:0"),
+            InlineKeyboardButton("🔥 Trending", callback_data="trending:0")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Welcome to സുന്ദരി 🔞 bot! Choose a category to see videos:",
+        reply_markup=reply_markup
+    )
 
-app_bot.add_handler(CommandHandler("start", start))
+# --- Button handler with pagination ---
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-# ---------------------------
-# Queue to process updates
-# ---------------------------
-update_queue = asyncio.Queue()
+    # Extract category and page number
+    data = query.data.split(":")
+    category = data[0]
+    page = int(data[1]) if len(data) > 1 else 0
 
-# Background processor to handle updates
-async def process_updates():
-    while True:
-        update = await update_queue.get()
-        try:
-            await app_bot.update_queue.put(update)
-        except Exception as e:
-            logger.error(f"Error processing update: {e}")
+    videos = VIDEOS.get(category, [])
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    batch = videos[start:end]
 
-# ---------------------------
-# FastAPI app
-# ---------------------------
-app = FastAPI()
+    if not batch:
+        await query.message.reply_text("❌ No videos available.")
+        return
 
-# Lifespan function keeps the bot running
-@app.on_event("startup")
-async def startup():
-    logger.info("Starting bot...")
-    # Set webhook
-    await app_bot.bot.set_webhook(WEBHOOK_URL)
-    # Start the background update processor
-    app.state.task = asyncio.create_task(process_updates())
-    logger.info("Bot started and webhook set ✅")
+    # Send videos as media group
+    from telegram import InputMediaVideo
+    media = [InputMediaVideo(video) for video in batch]
+    await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
-@app.on_event("shutdown")
-async def shutdown():
-    logger.info("Shutting down bot...")
-    app.state.task.cancel()
-    await app_bot.bot.delete_webhook()
-    logger.info("Webhook deleted and bot stopped ❌")
+    # Navigation buttons
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
+    if end < len(videos):
+        buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"{category}:{page+1}"))
 
-# ---------------------------
-# Webhook route
-# ---------------------------
-@app.post("/")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, app_bot.bot)
-    await update_queue.put(update)
-    return {"ok": True}
+    if buttons:
+        nav_markup = InlineKeyboardMarkup([buttons])
+        await query.message.reply_text("Navigate:", reply_markup=nav_markup)
 
-# ---------------------------
-# Run the bot manually if needed
-# ---------------------------
+# --- Main ---
+def main():
+    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.run_polling()
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("bot:app", host="0.0.0.0", port=8000)
+    main()
