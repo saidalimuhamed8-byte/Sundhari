@@ -24,8 +24,8 @@ if not WEBHOOK_URL:
 # --- Admin & Log Config ---
 ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
 LOG_CHANNEL_ID = -1002871565651  # Replace with your log channel ID
-FORCE_JOIN_GROUP_ID = -4874608248  # Replace with your Telegram group ID
-FORCE_JOIN_LINK = "https://t.me/+5BSe0PADOHZmYjY1"  # Replace with your group invite link
+FORCE_JOIN_CHANNEL_ID = -1003093267832  # Replace with your Telegram channel ID
+FORCE_JOIN_LINK = "https://t.me/+Goi69V3Dr242NzA9"  # Channel invite link
 
 # --- SQLite Database ---
 DB_FILE = "bot_data.db"
@@ -103,19 +103,14 @@ async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     except Exception as e:
         print(f"Failed to send log message: {e}")
 
-# --- Force-join check ---
-async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user_id = update.effective_user.id
+# --- Force join channel check ---
+async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
-        member = await context.bot.get_chat_member(chat_id=FORCE_JOIN_GROUP_ID, user_id=user_id)
+        member = await context.bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL_ID, user_id=user_id)
         if member.status in ("member", "administrator", "creator"):
             return True
     except Exception as e:
         print(f"Error checking membership: {e}")
-    await update.message.reply_text(
-        f"⛔ You must join our [group]({FORCE_JOIN_LINK}) to access videos!",
-        parse_mode="Markdown"
-    )
     return False
 
 # --- Video upload storage ---
@@ -123,9 +118,6 @@ pending_videos = {}  # key=user_id, value=category
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_membership(update, context):
-        return
-
     chat = update.effective_chat
     add_chat(chat.id, chat.type, getattr(chat, 'first_name', None), getattr(chat, 'username', None))
 
@@ -152,12 +144,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
-    # Force join check
-    fake_update = Update(update.update_id, message=query.message)  # simulate Update for check
-    if not await check_membership(fake_update, context):
+    # --- Force join channel check ---
+    is_member = await check_channel_membership(user_id, context)
+    if not is_member:
+        await query.message.reply_text(
+            f"⛔ You must join our channel to access videos!\nJoin here: [Click to Join]({FORCE_JOIN_LINK})",
+            parse_mode="Markdown"
+        )
         return
 
+    # --- Extract category and page ---
     try:
         category, page_str = query.data.split(":")
         page = int(page_str)
@@ -177,6 +175,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media = [InputMediaVideo(file_id) for file_id in batch]
     await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
+    # --- Navigation buttons ---
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
