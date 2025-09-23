@@ -1,5 +1,4 @@
 import os
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -11,7 +10,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-koyeb-app.com
 if not TOKEN or not WEBHOOK_URL:
     raise ValueError("BOT_TOKEN or WEBHOOK_URL not set in environment variables")
 
-# --- Video links ---
+# --- Video links (replace these URLs with real accessible URLs) ---
 VIDEOS = {
     "mallu": [
         "https://example.com/videos/mallu1.mp4",
@@ -34,7 +33,7 @@ PAGE_SIZE = 10
 # --- Telegram Bot Application ---
 bot_app = ApplicationBuilder().token(TOKEN).build()
 
-# --- Handlers ---
+# --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -75,6 +74,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.message.reply_text(f"⚠️ Failed to send videos: {e}")
 
+    # Navigation buttons
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
@@ -85,18 +85,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nav_markup = InlineKeyboardMarkup([buttons])
         await query.edit_message_text("Navigate:", reply_markup=nav_markup)
 
-# --- FastAPI Lifespan ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Set webhook on startup
-    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
-    yield
-    # Remove webhook on shutdown
-    await bot_app.bot.delete_webhook()
+# --- Add Telegram Handlers ---
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-app = FastAPI(lifespan=lifespan)
+# --- FastAPI App ---
+app = FastAPI()
 
-# --- Webhook Endpoint ---
+# Health check for Koyeb
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
+# Webhook endpoint
 @app.post(f"/webhook/{TOKEN}")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -105,11 +106,12 @@ async def telegram_webhook(request: Request):
     await bot_app.process_updates()
     return {"ok": True}
 
-# --- Health Check Endpoint ---
-@app.get("/")
-async def health():
-    return {"status": "ok"}
+# --- Set Telegram Webhook when FastAPI starts ---
+@app.on_event("startup")
+async def startup():
+    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
 
-# --- Add Telegram Handlers ---
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(button_handler))
+# --- Remove Webhook on shutdown ---
+@app.on_event("shutdown")
+async def shutdown():
+    await bot_app.bot.delete_webhook()
