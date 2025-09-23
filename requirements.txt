@@ -1,2 +1,2 @@
-python-telegram-bot
-Flask
+python-telegram-bot>=20.0
+Flask>=2.0
