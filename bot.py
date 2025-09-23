@@ -1,40 +1,35 @@
 import os
-from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("BOT_TOKEN")
-APP_URL = os.getenv("APP_URL")  # e.g. https://naughty-suzette-sasis-fdd9317b.koyeb.app
+# Replace with your BotFather token
+TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
 
-app = Flask(__name__)
+# Directory containing your video files
+VIDEO_DIR = "./videos"
 
-# Create bot application
-application = Application.builder().token(TOKEN).build()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Welcome! Send the name of the video you want and I'll send it to you.")
 
-# --- Handlers ---
-async def start(update: Update, context):
-    await update.message.reply_text("Hello! Bot is running on webhook 🚀")
+async def send_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    video_path = os.path.join(VIDEO_DIR, query)
+    # Try common video extensions
+    if not os.path.exists(video_path):
+        for ext in (".mp4", ".mov", ".avi", ".mkv"):
+            if os.path.exists(video_path + ext):
+                video_path = video_path + ext
+                break
+    if os.path.exists(video_path):
+        await update.message.reply_video(video=open(video_path, "rb"))
+    else:
+        await update.message.reply_text("❌ Sorry, video not found. Please check the name and try again.")
 
-application.add_handler(CommandHandler("start", start))
-
-# --- Flask Routes ---
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok", 200
-
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is alive ✅", 200
-
-# --- Startup: Set Webhook ---
-async def set_webhook():
-    webhook_url = f"{APP_URL}/{TOKEN}"
-    await application.bot.set_webhook(url=webhook_url)
-    print(f"Webhook set to {webhook_url}")
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, send_video))
+    app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(set_webhook())
-    app.run(host="0.0.0.0", port=8000)
+    main()
