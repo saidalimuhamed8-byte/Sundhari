@@ -2,7 +2,7 @@ import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- Replace these with actual direct URLs to your videos ---
+# --- Replace these URLs with your actual online video links ---
 VIDEOS = {
     "mallu": [
         "https://example.com/videos/mallu1.mp4",
@@ -35,13 +35,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Fixed unterminated string
     await update.message.reply_text(
-        "👋 Welcome to സുന്ദരി 🔞 bot ! 
-        Choose a category:",
+        "👋 Welcome to സുന്ദരി 🔞 bot! Choose a category:",
         reply_markup=reply_markup
     )
 
-# --- Pagination handler ---
+# --- Pagination / button handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
