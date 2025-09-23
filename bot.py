@@ -1,6 +1,13 @@
 import os
+import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ChatMemberHandler,
+)
 
 # --- Environment Variables ---
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -12,38 +19,111 @@ if not TOKEN:
 if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL not set in environment variables")
 
+# --- Admin Config ---
+ADMIN_IDS = [123456789]  # 👈 replace with your Telegram user ID
+LOG_CHANNEL_ID = -1001234567890  # 👈 replace with your log channel ID
+
+# --- SQLite Database ---
+DB_FILE = "bot_data.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            chat_id INTEGER PRIMARY KEY,
+            chat_type TEXT,
+            first_name TEXT,
+            username TEXT,
+            is_active INTEGER DEFAULT 1,
+            added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_chat(chat_id, chat_type, first_name=None, username=None):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR IGNORE INTO chats (chat_id, chat_type, first_name, username, is_active)
+        VALUES (?, ?, ?, ?, 1)
+    """, (chat_id, chat_type, first_name, username))
+    conn.commit()
+    conn.close()
+
+def update_chat_status(chat_id, is_active: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE chats SET is_active=? WHERE chat_id=?", (is_active, chat_id))
+    conn.commit()
+    conn.close()
+
+def get_chat_stats():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_type, COUNT(*) FROM chats WHERE is_active=1 GROUP BY chat_type")
+    stats = cursor.fetchall()
+    conn.close()
+    return stats
+
+def get_active_counts():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_type, COUNT(*) FROM chats WHERE is_active=1 GROUP BY chat_type")
+    stats = dict(cursor.fetchall())
+    conn.close()
+    users = stats.get("private", 0)
+    groups = stats.get("group", 0) + stats.get("supergroup", 0)
+    return users, groups
+
+# --- Utility: Logging ---
+async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
+    try:
+        await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Failed to send log message: {e}")
+
 # --- Video links ---
 VIDEOS = {
-    "mallu": [
-        "https://example.com/videos/mallu1.mp4",
-        "https://example.com/videos/mallu2.mp4"
-    ],
-    "latest": [
-        "https://example.com/videos/latest1.mp4",
-        "https://example.com/videos/latest2.mp4"
-    ],
-    "desi": [
-        "https://example.com/videos/desi1.mp4"
-    ],
-    "trending": [
-        "https://example.com/videos/trending1.mp4"
-    ]
+    "mallu": ["https://example.com/videos/mallu1.mp4", "https://example.com/videos/mallu2.mp4"],
+    "latest": ["https://example.com/videos/latest1.mp4", "https://example.com/videos/latest2.mp4"],
+    "desi": ["https://example.com/videos/desi1.mp4"],
+    "trending": ["https://example.com/videos/trending1.mp4"]
 }
 
 PAGE_SIZE = 1
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message and a menu of video categories."""
+    chat = update.effective_chat
+    add_chat(chat.id, chat.type, getattr(chat, 'first_name', None), getattr(chat, 'username', None))
+
+    users, groups = get_active_counts()
+
+    if chat.type == "private":
+        log_text = (
+            f"👤 *New user started bot:*\n"
+            f"ID: `{chat.id}`\n"
+            f"Name: {chat.first_name}\n"
+            f"Username: @{chat.username or 'N/A'}\n\n"
+            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+        )
+    else:
+        log_text = (
+            f"👥 *Bot used in group:*\n"
+            f"ID: `{chat.id}`\n"
+            f"Title: {chat.title}\n\n"
+            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+        )
+
+    await log_to_channel(context, log_text)
+
     keyboard = [
-        [
-            InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
-            InlineKeyboardButton("🆕 Latest", callback_data="latest:0")
-        ],
-        [
-            InlineKeyboardButton("🇮🇳 Desi", callback_data="desi:0"),
-            InlineKeyboardButton("🔥 Trending", callback_data="trending:0")
-        ]
+        [InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
+         InlineKeyboardButton("🆕 Latest", callback_data="latest:0")],
+        [InlineKeyboardButton("🇮🇳 Desi", callback_data="desi:0"),
+         InlineKeyboardButton("🔥 Trending", callback_data="trending:0")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -52,11 +132,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button presses and sends the corresponding videos."""
     query = update.callback_query
     await query.answer()
 
-    # Extract category and page from the callback data
     try:
         category, page_str = query.data.split(":")
         page = int(page_str)
@@ -65,7 +143,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     videos = VIDEOS.get(category, [])
-
     start_idx = page * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     batch = videos[start_idx:end_idx]
@@ -78,11 +155,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     media = [InputMediaVideo(url) for url in batch]
-
-    # Use a new reply_text message for the videos
     await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
 
-    # Navigation buttons
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
@@ -98,16 +172,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Failed to send navigation buttons: {e}")
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    stats = get_chat_stats()
+    msg = "📊 *Bot Usage Stats:*\n"
+    for chat_type, count in stats:
+        if chat_type == "private":
+            msg += f"👤 Users: {count}\n"
+        elif chat_type in ("group", "supergroup"):
+            msg += f"👥 Groups: {count}\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    status = update.my_chat_member.new_chat_member.status
+
+    if status in ("member", "administrator"):
+        add_chat(chat.id, chat.type, getattr(chat, 'title', None), None)
+        update_chat_status(chat.id, 1)
+        users, groups = get_active_counts()
+        log_text = (
+            f"✅ *Bot added to group:*\n"
+            f"ID: `{chat.id}`\n"
+            f"Title: {chat.title}\n\n"
+            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+        )
+        await log_to_channel(context, log_text)
+
+    elif status in ("left", "kicked"):
+        update_chat_status(chat.id, 0)
+        users, groups = get_active_counts()
+        log_text = (
+            f"❌ *Bot removed from group:*\n"
+            f"ID: `{chat.id}`\n"
+            f"Title: {chat.title}\n\n"
+            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+        )
+        await log_to_channel(context, log_text)
+
 # --- Telegram Bot Application ---
 def main():
-    """Initializes and runs the bot using a webhook."""
+    init_db()
     webhook_url_path = TOKEN
-    
     bot_app = ApplicationBuilder().token(TOKEN).build()
+
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
+    bot_app.add_handler(CommandHandler("stats", stats))
+    bot_app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
-    # Set up the webhook with a corrected URL
     bot_app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
