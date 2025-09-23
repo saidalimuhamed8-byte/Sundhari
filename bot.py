@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # Replace with your BotFather token
-TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
+TOKEN = '8224276236:AAFqXBAGkD7jTv5f7Y-kiUztO82jo0W3mB0'
 
 # Directory containing your video files
 VIDEO_DIR = "./videos"
