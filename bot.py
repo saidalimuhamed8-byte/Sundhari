@@ -1,16 +1,13 @@
 import os
-from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Environment Variables ---
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-koyeb-app.com
+if not TOKEN:
+    raise ValueError("BOT_TOKEN not set in environment variables")
 
-if not TOKEN or not WEBHOOK_URL:
-    raise ValueError("BOT_TOKEN or WEBHOOK_URL not set in environment variables")
-
-# --- Video links (replace these URLs with real accessible URLs) ---
+# --- Video links ---
 VIDEOS = {
     "mallu": [
         "https://example.com/videos/mallu1.mp4",
@@ -30,10 +27,7 @@ VIDEOS = {
 
 PAGE_SIZE = 10
 
-# --- Telegram Bot Application ---
-bot_app = ApplicationBuilder().token(TOKEN).build()
-
-# --- Telegram Handlers ---
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -85,33 +79,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nav_markup = InlineKeyboardMarkup([buttons])
         await query.edit_message_text("Navigate:", reply_markup=nav_markup)
 
-# --- Add Telegram Handlers ---
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CallbackQueryHandler(button_handler))
+# --- Telegram Bot Application ---
+def main():
+    bot_app = ApplicationBuilder().token(TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
+    bot_app.run_polling()
 
-# --- FastAPI App ---
-app = FastAPI()
-
-# Health check for Koyeb
-@app.get("/")
-async def health():
-    return {"status": "ok"}
-
-# Webhook endpoint
-@app.post(f"/webhook/{TOKEN}")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.update_queue.put(update)
-    await bot_app.process_updates()
-    return {"ok": True}
-
-# --- Set Telegram Webhook when FastAPI starts ---
-@app.on_event("startup")
-async def startup():
-    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
-
-# --- Remove Webhook on shutdown ---
-@app.on_event("shutdown")
-async def shutdown():
-    await bot_app.bot.delete_webhook()
+if __name__ == "__main__":
+    main()
