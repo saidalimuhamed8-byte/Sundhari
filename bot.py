@@ -101,19 +101,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Telegram Bot Application ---
 def main():
     """Initializes and runs the bot using a webhook."""
-    # Ensure URL and PORT are correctly set in the environment
     webhook_url_path = TOKEN
     
     bot_app = ApplicationBuilder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Set up the webhook
+    # Set up the webhook with a corrected URL
     bot_app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=webhook_url_path,
-        webhook_url=f"{WEBHOOK_URL}/{webhook_url_path}"
+        webhook_url=f"{WEBHOOK_URL.rstrip('/')}/{webhook_url_path}"
     )
 
 if __name__ == "__main__":
