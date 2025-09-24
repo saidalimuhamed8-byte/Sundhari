@@ -1,12 +1,6 @@
 import os
-import re
 import sqlite3
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    InputMediaVideo,
-)
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -26,21 +20,17 @@ PORT = int(os.environ.get("PORT", 8000))
 if not TOKEN:
     raise ValueError("BOT_TOKEN not set in environment variables")
 
-# Admins and log channel
-ADMIN_IDS = [8301447343]  # your admin ids
-LOG_CHANNEL_ID = -1002871565651  # optional
-BATCH_SIZE = 10  # videos per page
+ADMIN_IDS = [8301447343]  # Admin IDs
+LOG_CHANNEL_ID = -1002871565651
+BATCH_SIZE = 10
 
-# ---------- In-memory caches ----------
 pending_videos = {}
-
-# ---------- DB ----------
 DB_FILE = os.environ.get("BOT_DB", "bot_data.db")
 
+# ---------- DB ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # chats
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
@@ -51,7 +41,6 @@ def init_db():
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # videos
     cur.execute("""
         CREATE TABLE IF NOT EXISTS videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +48,6 @@ def init_db():
             file_id TEXT
         )
     """)
-    # forcesub channel
     cur.execute("""
         CREATE TABLE IF NOT EXISTS forcesub (
             id INTEGER PRIMARY KEY CHECK (id=1),
@@ -137,14 +125,22 @@ def get_videos(category: str):
     conn.close()
     return results
 
-# ---------- FSUB helper ----------
-async def is_member(bot, user_id, channel_id):
-    if not channel_id:
+# ---------- FSUB helpers ----------
+async def is_member(bot, user_id, chat_id):
+    if not chat_id:
         return True
     try:
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status in ["member", "administrator", "creator"]
     except BadRequest:
+        return False
+
+async def can_request_join(bot, chat_id):
+    try:
+        me = await bot.get_me()
+        my_status = await bot.get_chat_member(chat_id=chat_id, user_id=me.id)
+        return my_status.status == "administrator"
+    except Exception:
         return False
 
 # ---------- Logging ----------
@@ -162,8 +158,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_chat(chat.id, chat.type, getattr(chat, "first_name", None), getattr(chat, "username", None))
 
     users, groups = get_active_counts()
-
-    # Log private user
     if chat.type == "private":
         name = chat.first_name or ""
         username = f"@{chat.username}" if chat.username else "❌ No username"
@@ -190,42 +184,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # ---------- FSUB check ----------
-    fs_channel = get_forcesub_channel()
-    if fs_channel and not await is_member(context.bot, user_id, fs_channel):
-        try:
-            chat = await context.bot.get_chat(fs_channel)
-            username = getattr(chat, "username", "")
-            if username:
-                join_link = f"https://t.me/{username}"
-                keyboard = [[InlineKeyboardButton("📌 Join Channel", url=join_link)]]
-                await query.message.reply_text(
-                    "You must join the channel to access videos:",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                # Private channel: show request-to-join button if possible
-                try:
-                    button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
+    fs_chat_id = get_forcesub_channel()
+    if fs_chat_id:
+        if not await is_member(context.bot, user_id, fs_chat_id):
+            try:
+                chat = await context.bot.get_chat(fs_chat_id)
+                title = getattr(chat, "title", "No title")
+                username = getattr(chat, "username", None)
+                chat_type = getattr(chat, "type", "channel")
+                bot_can_request = await can_request_join(context.bot, fs_chat_id)
+
+                if username and chat_type in ("channel", "supergroup") and not bot_can_request:
+                    link = f"https://t.me/{username}"
+                    button = InlineKeyboardButton("📌 Join", url=link)
                     await query.message.reply_text(
-                        "You must join the required channel to access videos.",
-                        reply_markup=InlineKeyboardMarkup([[button]])
+                        f"🔗 You must join: [{title}]({link})",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[button]]),
+                        disable_web_page_preview=True
                     )
-                except Exception:
+                elif bot_can_request:
+                    button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_chat_id)
                     await query.message.reply_text(
-                        "You must join the required channel to access videos.\n"
+                        f"🔗 You must join the private {chat_type}: *{title}*",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[button]]),
+                        disable_web_page_preview=True
+                    )
+                else:
+                    await query.message.reply_text(
+                        "You must join the required chat to access videos.\n"
                         "Since it is private, please join manually using the invite link."
                     )
-        except Exception:
-            await query.message.reply_text(
-                "You must join the required channel to access videos.\n"
-                "Since it is private, please join manually using the invite link."
-            )
-        return
+            except Exception:
+                await query.message.reply_text(
+                    "You must join the required chat to access videos.\n"
+                    "Since it is private, please join manually using the invite link."
+                )
+            return  # Stop here until user joins
 
     # ---------- Video pagination ----------
     category, page_str = query.data.split(":")
     page = int(page_str)
-
     videos = get_videos(category)
     start_idx = page * BATCH_SIZE
     end_idx = start_idx + BATCH_SIZE
@@ -250,7 +250,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if buttons:
         await query.message.reply_text("Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
 
-# ---------- Admin commands ----------
+# ---------- Admin / Bot commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Not authorized.")
@@ -274,6 +274,38 @@ async def forcesub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Forcesub channel set to `{channel_id}`", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
+
+async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    fs_channel = get_forcesub_channel()
+    if not fs_channel:
+        await update.message.reply_text("ℹ️ Force subscription is not enabled.")
+        return
+    try:
+        chat = await context.bot.get_chat(fs_channel)
+        title = getattr(chat, "title", "No title")
+        username = getattr(chat, "username", None)
+        if username:
+            link = f"https://t.me/{username}"
+            button = InlineKeyboardButton("📌 Join Channel", url=link)
+            await update.message.reply_text(
+                f"🔗 You must join: [{title}]({link})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[button]]),
+                disable_web_page_preview=True
+            )
+        else:
+            button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
+            await update.message.reply_text(
+                f"🔗 You must join the private channel: *{title}*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[button]]),
+                disable_web_page_preview=True
+            )
+    except Exception:
+        await update.message.reply_text(
+            "You must join the required channel to access videos.\n"
+            "Since it is private, please join manually using the invite link."
+        )
 
 # ---------- Video management ----------
 async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,7 +343,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = pending_videos[user_id]["category"]
     else:
         category = pending_videos[user_id]
-
     if update.message.video:
         add_video_to_db(category, update.message.video.file_id)
         await update.message.reply_text(f"✅ Video added to category *{category}*", parse_mode="Markdown")
@@ -340,7 +371,6 @@ async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
-# ---------- Utility ----------
 async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"📌 This chat ID is: `{chat.id}`", parse_mode="Markdown")
@@ -352,75 +382,8 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if status in ("member", "administrator"):
         add_chat(chat.id, chat.type, getattr(chat, "title", None), getattr(chat, "username", None))
-
-        users, groups = get_active_counts()
-        if chat.type in ("group", "supergroup", "channel"):
-            title = getattr(chat, "title", "❌ No title")
-            username = f"@{chat.username}" if chat.username else "❌ No username"
-            log_text = (
-                "👥 Bot added to a new group/channel:\n"
-                f"ID: `{chat.id}`\n"
-                f"Title: {title}\n"
-                f"Username: {username}\n\n"
-                f"📊 Now: 👤 {users} users | 👥 {groups} groups"
-            )
-            await log_to_channel(context, log_text)
-
     elif status in ("left", "kicked"):
         update_chat_status(chat.id, 0)
-        if chat.type in ("group", "supergroup", "channel"):
-            title = getattr(chat, "title", "❌ No title")
-            log_text = (
-                "❌ Bot removed from group/channel:\n"
-                f"ID: `{chat.id}`\n"
-                f"Title: {title}"
-            )
-            await log_to_channel(context, log_text)
-
-# ---------- /fsub command for force subscription ----------
-async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    fs_channel = get_forcesub_channel()
-    if not fs_channel:
-        await update.message.reply_text("ℹ️ Force subscription is not enabled.")
-        return
-
-    try:
-        chat = await context.bot.get_chat(fs_channel)
-        title = getattr(chat, "title", "No title")
-        username = getattr(chat, "username", None)
-        if username:
-            # Public channel: show normal join button
-            link = f"https://t.me/{username}"
-            button = InlineKeyboardButton("📌 Join Channel", url=link)
-            msg = f"🔗 You must join the channel: [{title}]({link})"
-            await update.message.reply_text(
-                msg, parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[button]]),
-                disable_web_page_preview=True
-            )
-        else:
-            # Private channel: show REQUEST TO JOIN button
-            try:
-                button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
-                msg = (
-                    f"🔗 You must join the private channel: *{title}*\n"
-                    f"Channel ID: `{fs_channel}`"
-                )
-                await update.message.reply_text(
-                    msg, parse_mode='Markdown',
-                    reply_markup=InlineKeyboardMarkup([[button]]),
-                    disable_web_page_preview=True
-                )
-            except Exception:
-                await update.message.reply_text(
-                    "You must join the required channel to access videos.\n"
-                    "Since it is private, please join manually using the invite link."
-                )
-    except Exception:
-        await update.message.reply_text(
-            "You must join the required channel to access videos.\n"
-            "Since it is private, please join manually using the invite link."
-        )
 
 # ---------- Main ----------
 def main():
@@ -431,12 +394,12 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("forcesub", forcesub))
+    app.add_handler(CommandHandler("fsub", fsub))
     app.add_handler(CommandHandler("addvideo", addvideo))
     app.add_handler(CommandHandler("bulkadd", bulkadd))
     app.add_handler(CommandHandler("done", done_bulk))
     app.add_handler(CommandHandler("removevideo", removevideo))
     app.add_handler(CommandHandler("getid", getid))
-    app.add_handler(CommandHandler("fsub", fsub))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
     app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
