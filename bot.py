@@ -26,9 +26,7 @@ LOG_CHANNEL_ID = -1002871565651  # optional
 BATCH_SIZE = 10  # videos per page
 
 # ---------- In-memory caches ----------
-# verified_users[channel_id] = set(user_ids)
 verified_users = {}
-# pending videos during admin add: pending_videos[user_id] = category
 pending_videos = {}
 
 # ---------- DB ----------
@@ -38,7 +36,6 @@ DB_FILE = "bot_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-
     # chats
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
@@ -50,7 +47,6 @@ def init_db():
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     # videos
     cur.execute("""
         CREATE TABLE IF NOT EXISTS videos (
@@ -59,7 +55,6 @@ def init_db():
             file_id TEXT
         )
     """)
-
     # pending join requests
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pending_requests (
@@ -69,7 +64,6 @@ def init_db():
             PRIMARY KEY(user_id, channel_id)
         )
     """)
-
     # force_join config (single row id=1)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS force_join (
@@ -78,7 +72,6 @@ def init_db():
         )
     """)
     cur.execute("INSERT OR IGNORE INTO force_join (id, channel_id) VALUES (1, NULL)")
-
     conn.commit()
     conn.close()
 
@@ -221,9 +214,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ Force-join channel not set.")
         return
 
-    # ---------- Check pending request ----------
     if not is_pending_request(user_id, channel_id):
-        # add to pending if not exists
         add_pending_request(user_id, channel_id)
         keyboard = [[InlineKeyboardButton("Request Access", callback_data=f"request:{query.data}")]]
         await query.message.reply_text(
@@ -232,8 +223,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ---------- Send videos ----------
-    # decode callback data
     if query.data.startswith("request:"):
         _, data = query.data.split(":", 1)
         category, page_str = data.split(":")
@@ -251,9 +240,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     media = [InputMediaVideo(f) for f in batch]
-    await context.bot.send_media_group(chat_id=query.message.chat_id, media=media)
+    try:
+        await context.bot.send_media_group(chat_id=user_id, media=media)
+        await query.message.reply_text("✅ Videos sent to your PM.")
+    except Exception:
+        await query.message.reply_text("❌ Cannot send PM. Make sure you started the bot.")
 
-    # navigation buttons
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
@@ -281,13 +273,28 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Not authorized.")
         return
+
     if len(context.args) != 1:
-        await update.message.reply_text("Usage: /setchannel <channel_id>")
+        await update.message.reply_text("Usage: /setchannel <channel_id or link>")
         return
+
+    input_channel = context.args[0]
+
     try:
-        new_channel_id = int(context.args[0])
-        update_force_join(new_channel_id)
-        # clear all verified users and pending requests
+        if input_channel.startswith("@") or input_channel.startswith("t.me/"):
+            username = input_channel.replace("https://t.me/", "").replace("@", "")
+            chat = await context.bot.get_chat(username)
+            channel_id = chat.id
+        else:
+            channel_id = int(input_channel)
+            chat = await context.bot.get_chat(channel_id)
+
+        bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        if bot_member.status not in ["administrator", "creator"]:
+            await update.message.reply_text("❌ Bot must be admin in the channel!")
+            return
+
+        update_force_join(channel_id)
         verified_users.clear()
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
@@ -295,8 +302,8 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
 
-        await update.message.reply_text(f"✅ Force-join channel updated to `{new_channel_id}`.\nAll verifications cleared.",
-                                        parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Force-join channel set to {chat.title} (`{channel_id}`).\nAll verifications cleared.", parse_mode="Markdown")
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -313,14 +320,62 @@ async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📥 Now send the video to add to category *{context.args[0]}*", parse_mode="Markdown")
 
 
+async def bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /bulkadd <category>\nThen send multiple videos. Send /done to finish.")
+        return
+    category = context.args[0].lower()
+    pending_videos[update.effective_user.id] = {"category": category, "bulk": True}
+    await update.message.reply_text(f"📥 Now send the videos for category *{category}*.\nSend /done when finished.", parse_mode="Markdown")
+
+
+async def done_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in pending_videos and isinstance(pending_videos[user_id], dict) and pending_videos[user_id].get("bulk"):
+        del pending_videos[user_id]
+        await update.message.reply_text("✅ Bulk upload finished.")
+
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS or user_id not in pending_videos:
         return
-    category = pending_videos[user_id]
+    if isinstance(pending_videos[user_id], dict):
+        category = pending_videos[user_id]["category"]
+    else:
+        category = pending_videos[user_id]
+
     if update.message.video:
         add_video_to_db(category, update.message.video.file_id)
         await update.message.reply_text(f"✅ Video added to category *{category}*", parse_mode="Markdown")
+
+
+async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /removevideo <category> <index>")
+        return
+    category = context.args[0].lower()
+    try:
+        index = int(context.args[1]) - 1
+        videos = get_videos(category)
+        if index < 0 or index >= len(videos):
+            await update.message.reply_text("❌ Invalid index")
+            return
+        file_id = videos[index]
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM videos WHERE category=? AND file_id=?", (category, file_id))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ Video at index {index+1} removed from category *{category}*", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 # ---------- Chat member tracking ----------
@@ -343,6 +398,9 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("addvideo", addvideo))
+    app.add_handler(CommandHandler("bulkadd", bulkadd))
+    app.add_handler(CommandHandler("done", done_bulk))
+    app.add_handler(CommandHandler("removevideo", removevideo))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
     app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
