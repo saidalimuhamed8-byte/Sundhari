@@ -21,19 +21,20 @@ PORT = int(os.environ.get("PORT", 8000))
 if not TOKEN:
     raise ValueError("BOT_TOKEN not set in environment variables")
 
+# Admins and log channel
 ADMIN_IDS = [8301447343]  # your admin ids
-LOG_CHANNEL_ID = -1002871565651
-BATCH_SIZE = 10
+LOG_CHANNEL_ID = -1002871565651  # optional
+BATCH_SIZE = 10  # videos per page
 
 # ---------- FSUB / Request Channel ----------
 id_pattern = re.compile(r"^-?\d+$")
-auth_channel = os.environ.get('AUTH_CHANNEL')
+auth_channel = os.environ.get('AUTH_CHANNEL')  # Channel users must join
 AUTH_CHANNEL = int(auth_channel) if auth_channel and id_pattern.search(auth_channel) else None
 
-req_channel = os.environ.get("REQ_CHANNEL")
+req_channel = os.environ.get("REQ_CHANNEL")  # Optional channel for join requests
 REQ_CHANNEL = (int(req_channel) if req_channel and id_pattern.search(req_channel) else False) if req_channel is not None else None
 
-# ---------- Caches ----------
+# ---------- In-memory caches ----------
 verified_users = {}
 pending_videos = {}
 
@@ -44,7 +45,7 @@ DB_FILE = os.environ.get("JOIN_REQS_DB", "bot_data.db")
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # Chats
+    # chats
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
@@ -55,7 +56,7 @@ def init_db():
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Videos
+    # videos
     cur.execute("""
         CREATE TABLE IF NOT EXISTS videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,24 +64,23 @@ def init_db():
             file_id TEXT
         )
     """)
-    # Pending join requests
+    # pending join requests
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pending_requests (
             user_id INTEGER,
-            channel_id TEXT,
+            channel_id INTEGER,
             requested_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(user_id, channel_id)
         )
     """)
-    # Force join config
+    # force_join config (single row id=1)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS force_join (
             id INTEGER PRIMARY KEY CHECK (id=1),
-            channel_id TEXT,
-            join_link TEXT
+            channel_id INTEGER
         )
     """)
-    cur.execute("INSERT OR IGNORE INTO force_join (id, channel_id, join_link) VALUES (1, NULL, NULL)")
+    cur.execute("INSERT OR IGNORE INTO force_join (id, channel_id) VALUES (1, NULL)")
     conn.commit()
     conn.close()
 
@@ -91,10 +91,8 @@ async def is_member(bot, user_id, channel_id):
     if not channel_id:
         return True
     try:
-        if str(channel_id).isdigit():
-            member = await bot.get_chat_member(chat_id=int(channel_id), user_id=user_id)
-            return member.status in ["member", "administrator", "creator"]
-        return False
+        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
     except BadRequest:
         return False
 
@@ -158,7 +156,7 @@ def get_videos(category: str):
 
 
 # ---------- Pending requests helpers ----------
-def add_pending_request(user_id: int, channel_id: str):
+def add_pending_request(user_id: int, channel_id: int):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO pending_requests (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
@@ -166,7 +164,7 @@ def add_pending_request(user_id: int, channel_id: str):
     conn.close()
 
 
-def remove_pending_request(user_id: int, channel_id: str):
+def remove_pending_request(user_id: int, channel_id: int):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("DELETE FROM pending_requests WHERE user_id=? AND channel_id=?", (user_id, channel_id))
@@ -174,7 +172,7 @@ def remove_pending_request(user_id: int, channel_id: str):
     conn.close()
 
 
-def is_pending_request(user_id: int, channel_id: str):
+def is_pending_request(user_id: int, channel_id: int):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM pending_requests WHERE user_id=? AND channel_id=?", (user_id, channel_id))
@@ -216,21 +214,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # ---------- FSUB check ----------
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT channel_id, join_link FROM force_join WHERE id=1")
-    row = cur.fetchone()
-    conn.close()
-
-    channel_id, join_link = row if row else (None, None)
-
-    if channel_id and not await is_member(context.bot, user_id, int(channel_id) if str(channel_id).isdigit() else None):
-        add_pending_request(user_id, channel_id)
-        if join_link:
-            keyboard = [[InlineKeyboardButton("🔗 Join Channel", url=join_link)]]
-            await query.message.reply_text("📌 You must join the channel first:", reply_markup=InlineKeyboardMarkup(keyboard))
+    if AUTH_CHANNEL and not await is_member(context.bot, user_id, AUTH_CHANNEL):
+        add_pending_request(user_id, AUTH_CHANNEL)
+        chat = await context.bot.get_chat(AUTH_CHANNEL)
+        username = getattr(chat, "username", "")
+        if username:
+            join_link = f"https://t.me/{username}"
         else:
-            await query.message.reply_text("❌ You must join the channel first. Contact admin.")
+            join_link = "use the private invite link manually"
+        keyboard = [[InlineKeyboardButton("📌 Join Channel", url=join_link)]]
+        await query.message.reply_text(
+            "You must join the channel to access videos:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     # ---------- Existing video logic ----------
@@ -286,31 +282,34 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Not authorized.")
         return
 
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /setchannel <channel_id_or_username> <join_link>")
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /setchannel <channel_id or username>")
         return
 
-    channel_input = context.args[0]
-    join_link = context.args[1]
+    input_channel = context.args[0]
 
     try:
-        if channel_input.startswith("@"):
-            chat = await context.bot.get_chat(channel_input)
-            channel_id = str(chat.id)
+        if input_channel.startswith("@"):
+            chat = await context.bot.get_chat(input_channel)
         else:
-            channel_id = channel_input
+            chat = await context.bot.get_chat(int(input_channel))
+        channel_id = chat.id
+
+        bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        if bot_member.status not in ["administrator", "creator"]:
+            await update.message.reply_text("❌ Bot must be admin in the channel!")
+            return
 
         global AUTH_CHANNEL
-        AUTH_CHANNEL = int(channel_id) if str(channel_id).isdigit() else channel_id
-
+        AUTH_CHANNEL = channel_id
+        verified_users.clear()
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
-        cur.execute("UPDATE force_join SET channel_id=?, join_link=? WHERE id=1", (AUTH_CHANNEL, join_link))
         cur.execute("DELETE FROM pending_requests")
         conn.commit()
         conn.close()
 
-        await update.message.reply_text(f"✅ Force-join channel set.\nChannel ID: `{channel_id}`\nJoin link: {join_link}", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Force-join channel set to {chat.title} (`{channel_id}`).\nAll verifications cleared.", parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -386,9 +385,57 @@ async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+# ---------- Utility ----------
+async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"📌 This chat ID is: `{chat.id}`",
+        parse_mode="Markdown"
+    )
+
+
 # ---------- Chat member tracking ----------
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
     if status in ("member", "administrator"):
-        add_chat(chat.id, chat.type, getattr
+        add_chat(
+            chat.id, 
+            chat.type, 
+            getattr(chat, "title", None), 
+            getattr(chat, "username", None)
+        )
+    elif status in ("left", "kicked"):
+        update_chat_status(chat.id, 0)
+
+
+# ---------- Main ----------
+def main():
+    init_db()
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("setchannel", set_channel))
+    app.add_handler(CommandHandler("addvideo", addvideo))
+    app.add_handler(CommandHandler("bulkadd", bulkadd))
+    app.add_handler(CommandHandler("done", done_bulk))
+    app.add_handler(CommandHandler("removevideo", removevideo))
+    app.add_handler(CommandHandler("getid", getid))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
+    app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
+
+    if WEBHOOK_URL:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL.rstrip('/')}/{TOKEN}"
+        )
+    else:
+        app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
