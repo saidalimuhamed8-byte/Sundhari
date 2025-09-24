@@ -203,12 +203,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
-                # If bot is admin, provide request-to-join button
-                button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
-                await query.message.reply_text(
-                    "You must join the required channel to access videos.",
-                    reply_markup=InlineKeyboardMarkup([[button]])
-                )
+                # Private channel: show request-to-join button if possible
+                try:
+                    button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
+                    await query.message.reply_text(
+                        "You must join the required channel to access videos.",
+                        reply_markup=InlineKeyboardMarkup([[button]])
+                    )
+                except Exception:
+                    await query.message.reply_text(
+                        "You must join the required channel to access videos.\n"
+                        "Since it is private, please join manually using the invite link."
+                    )
         except Exception:
             await query.message.reply_text(
                 "You must join the required channel to access videos.\n"
@@ -394,23 +400,26 @@ async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Private channel: show REQUEST TO JOIN button
-            button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
-            msg = (
-                f"🔗 You must join the private channel: *{title}*\n"
-                f"Channel ID: `{fs_channel}`"
-            )
-            await update.message.reply_text(
-                msg, parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[button]]),
-                disable_web_page_preview=True
-            )
+            try:
+                button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
+                msg = (
+                    f"🔗 You must join the private channel: *{title}*\n"
+                    f"Channel ID: `{fs_channel}`"
+                )
+                await update.message.reply_text(
+                    msg, parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([[button]]),
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "You must join the required channel to access videos.\n"
+                    "Since it is private, please join manually using the invite link."
+                )
     except Exception:
-        msg = (
-            f"⚠️ Force subscription is set to channel ID `{fs_channel}`.\n"
-            "But I could not fetch its details (maybe I am not an admin there or the channel is deleted)."
-        )
         await update.message.reply_text(
-            msg, parse_mode='Markdown', disable_web_page_preview=True
+            "You must join the required channel to access videos.\n"
+            "Since it is private, please join manually using the invite link."
         )
 
 # ---------- Main ----------
