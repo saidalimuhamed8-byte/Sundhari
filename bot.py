@@ -1,5 +1,4 @@
 import os
-import re
 import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
@@ -157,7 +156,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_chat(chat.id, chat.type, getattr(chat, "first_name", None), getattr(chat, "username", None))
 
     users, groups = get_active_counts()
-    await log_to_channel(context, f"👤 New user: `{chat.id}` — Now: 👤 {users} users | 👥 {groups} groups")
+
+    # Log private user
+    if chat.type == "private":
+        name = chat.first_name or ""
+        username = f"@{chat.username}" if chat.username else "❌ No username"
+        log_text = (
+            "👤 New user started bot:\n"
+            f"ID: `{chat.id}`\n"
+            f"Name: {name}\n"
+            f"Username: {username}\n\n"
+            f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+        )
+        await log_to_channel(context, log_text)
 
     keyboard = [
         [InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
@@ -204,7 +215,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ No videos in this category.")
         return
 
-    media = [InputMediaVideo(f) for f in batch]
+    media = [InputMediaVideo(f, has_spoiler=False, supports_streaming=True, has_protected_content=True) for f in batch]
     try:
         await context.bot.send_media_group(chat_id=user_id, media=media)
         await query.message.reply_text("✅ Videos sent to your PM.")
@@ -318,10 +329,33 @@ async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
+
     if status in ("member", "administrator"):
         add_chat(chat.id, chat.type, getattr(chat, "title", None), getattr(chat, "username", None))
+
+        users, groups = get_active_counts()
+        if chat.type in ("group", "supergroup", "channel"):
+            title = getattr(chat, "title", "❌ No title")
+            username = f"@{chat.username}" if chat.username else "❌ No username"
+            log_text = (
+                "👥 Bot added to a new group/channel:\n"
+                f"ID: `{chat.id}`\n"
+                f"Title: {title}\n"
+                f"Username: {username}\n\n"
+                f"📊 Now: 👤 {users} users | 👥 {groups} groups"
+            )
+            await log_to_channel(context, log_text)
+
     elif status in ("left", "kicked"):
         update_chat_status(chat.id, 0)
+        if chat.type in ("group", "supergroup", "channel"):
+            title = getattr(chat, "title", "❌ No title")
+            log_text = (
+                "❌ Bot removed from group/channel:\n"
+                f"ID: `{chat.id}`\n"
+                f"Title: {title}"
+            )
+            await log_to_channel(context, log_text)
 
 # ---------- Main ----------
 def main():
