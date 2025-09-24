@@ -218,8 +218,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_pending_request(user_id, AUTH_CHANNEL)
         chat = await context.bot.get_chat(AUTH_CHANNEL)
         username = getattr(chat, "username", "")
+        if username:
+            join_link = f"https://t.me/{username}"
+        else:
+            join_link = "your private channel (use invite link manually)"
         await query.message.reply_text(
-            f"📌 You must join the channel first: [Join Here](https://t.me/{username})",
+            f"📌 You must join the channel first: [Join Here]({join_link})",
             parse_mode="Markdown"
         )
         return
@@ -380,6 +384,15 @@ async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+# ---------- Utility ----------
+async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"📌 This chat ID is: `{chat.id}`",
+        parse_mode="Markdown"
+    )
+
+
 # ---------- Chat member tracking ----------
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -403,6 +416,7 @@ def main():
     app.add_handler(CommandHandler("bulkadd", bulkadd))
     app.add_handler(CommandHandler("done", done_bulk))
     app.add_handler(CommandHandler("removevideo", removevideo))
+    app.add_handler(CommandHandler("getid", getid))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
     app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
