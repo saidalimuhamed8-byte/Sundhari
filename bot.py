@@ -1,5 +1,4 @@
 import os
-import re
 import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
@@ -26,26 +25,17 @@ ADMIN_IDS = [8301447343]  # your admin ids
 LOG_CHANNEL_ID = -1002871565651  # optional
 BATCH_SIZE = 10  # videos per page
 
-# ---------- FSUB / Request Channel ----------
-id_pattern = re.compile(r"^-?\d+$")
-auth_channel = os.environ.get('AUTH_CHANNEL')  # Channel users must join
-AUTH_CHANNEL = int(auth_channel) if auth_channel and id_pattern.search(auth_channel) else None
-
-req_channel = os.environ.get("REQ_CHANNEL")  # Optional channel for join requests
-REQ_CHANNEL = (int(req_channel) if req_channel and id_pattern.search(req_channel) else False) if req_channel is not None else None
-
-# ---------- In-memory caches ----------
-verified_users = {}
+# In-memory caches
 pending_videos = {}
 
-# ---------- DB ----------
+# DB
 DB_FILE = os.environ.get("JOIN_REQS_DB", "bot_data.db")
 
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # chats
+    # Chats
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             chat_id INTEGER PRIMARY KEY,
@@ -56,7 +46,7 @@ def init_db():
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # videos
+    # Videos
     cur.execute("""
         CREATE TABLE IF NOT EXISTS videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,23 +54,14 @@ def init_db():
             file_id TEXT
         )
     """)
-    # pending join requests
+    # Force-sub channel
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS pending_requests (
-            user_id INTEGER,
-            channel_id INTEGER,
-            requested_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY(user_id, channel_id)
-        )
-    """)
-    # force_join config (single row id=1)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS force_join (
+        CREATE TABLE IF NOT EXISTS force_sub (
             id INTEGER PRIMARY KEY CHECK (id=1),
             channel_id INTEGER
         )
     """)
-    cur.execute("INSERT OR IGNORE INTO force_join (id, channel_id) VALUES (1, NULL)")
+    cur.execute("INSERT OR IGNORE INTO force_sub (id, channel_id) VALUES (1, NULL)")
     conn.commit()
     conn.close()
 
@@ -95,6 +76,23 @@ async def is_member(bot, user_id, channel_id):
         return member.status in ["member", "administrator", "creator"]
     except BadRequest:
         return False
+
+
+def get_forcesub_channel():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT channel_id FROM force_sub WHERE id=1")
+    r = cur.fetchone()
+    conn.close()
+    return r[0] if r else None
+
+
+def set_forcesub_channel(channel_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("UPDATE force_sub SET channel_id=? WHERE id=1", (channel_id,))
+    conn.commit()
+    conn.close()
 
 
 # ---------- Chat helpers ----------
@@ -155,32 +153,6 @@ def get_videos(category: str):
     return results
 
 
-# ---------- Pending requests helpers ----------
-def add_pending_request(user_id: int, channel_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO pending_requests (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
-    conn.commit()
-    conn.close()
-
-
-def remove_pending_request(user_id: int, channel_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM pending_requests WHERE user_id=? AND channel_id=?", (user_id, channel_id))
-    conn.commit()
-    conn.close()
-
-
-def is_pending_request(user_id: int, channel_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pending_requests WHERE user_id=? AND channel_id=?", (user_id, channel_id))
-    r = cur.fetchone()
-    conn.close()
-    return bool(r)
-
-
 # ---------- Logging ----------
 async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     if not LOG_CHANNEL_ID:
@@ -214,14 +186,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # ---------- FSUB check ----------
-    if AUTH_CHANNEL and not await is_member(context.bot, user_id, AUTH_CHANNEL):
-        add_pending_request(user_id, AUTH_CHANNEL)
-        chat = await context.bot.get_chat(AUTH_CHANNEL)
+    fs_channel = get_forcesub_channel()
+    if fs_channel and not await is_member(context.bot, user_id, fs_channel):
+        chat = await context.bot.get_chat(fs_channel)
         username = getattr(chat, "username", "")
-        if username:
-            join_link = f"https://t.me/{username}"
-        else:
-            join_link = "use the private invite link manually"
+        join_link = f"https://t.me/{username}" if username else "use the invite link manually"
         keyboard = [[InlineKeyboardButton("📌 Join Channel", url=join_link)]]
         await query.message.reply_text(
             "You must join the channel to access videos:",
@@ -229,14 +198,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ---------- Existing video logic ----------
-    if query.data.startswith("request:"):
-        _, data = query.data.split(":", 1)
-        category, page_str = data.split(":")
-    else:
-        category, page_str = query.data.split(":")
+    # ---------- Video logic ----------
+    category, page_str = query.data.split(":")
     page = int(page_str)
-
     videos = get_videos(category)
     start_idx = page * BATCH_SIZE
     end_idx = start_idx + BATCH_SIZE
@@ -277,40 +241,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
-async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forcesub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Not authorized.")
+        await update.message.reply_text("⛔ Not authorized")
         return
-
     if len(context.args) != 1:
-        await update.message.reply_text("Usage: /setchannel <channel_id or username>")
+        await update.message.reply_text("Usage: /forcesub <channel_id>")
         return
-
-    input_channel = context.args[0]
-
     try:
-        if input_channel.startswith("@"):
-            chat = await context.bot.get_chat(input_channel)
-        else:
-            chat = await context.bot.get_chat(int(input_channel))
-        channel_id = chat.id
-
-        bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
-        if bot_member.status not in ["administrator", "creator"]:
-            await update.message.reply_text("❌ Bot must be admin in the channel!")
-            return
-
-        global AUTH_CHANNEL
-        AUTH_CHANNEL = channel_id
-        verified_users.clear()
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM pending_requests")
-        conn.commit()
-        conn.close()
-
-        await update.message.reply_text(f"✅ Force-join channel set to {chat.title} (`{channel_id}`).\nAll verifications cleared.", parse_mode="Markdown")
-
+        channel_id = int(context.args[0])
+        set_forcesub_channel(channel_id)
+        await update.message.reply_text(f"✅ Force-sub channel set to `{channel_id}`", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -400,9 +341,9 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     status = update.my_chat_member.new_chat_member.status
     if status in ("member", "administrator"):
         add_chat(
-            chat.id, 
-            chat.type, 
-            getattr(chat, "title", None), 
+            chat.id,
+            chat.type,
+            getattr(chat, "title", None),
             getattr(chat, "username", None)
         )
     elif status in ("left", "kicked"):
@@ -417,7 +358,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("setchannel", set_channel))
+    app.add_handler(CommandHandler("forcesub", forcesub))
     app.add_handler(CommandHandler("addvideo", addvideo))
     app.add_handler(CommandHandler("bulkadd", bulkadd))
     app.add_handler(CommandHandler("done", done_bulk))
