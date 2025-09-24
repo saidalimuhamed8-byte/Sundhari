@@ -31,11 +31,6 @@ ADMIN_IDS = [8301447343]  # your admin ids
 LOG_CHANNEL_ID = -1002871565651  # optional
 BATCH_SIZE = 10  # videos per page
 
-# ---------- FSUB via environment variable ----------
-id_pattern = re.compile(r'^-?\d+$')
-auth_channel = os.environ.get('AUTH_CHANNEL')
-AUTH_CHANNEL = int(auth_channel) if auth_channel and id_pattern.search(auth_channel) else None
-
 # ---------- In-memory caches ----------
 pending_videos = {}
 
@@ -64,7 +59,7 @@ def init_db():
             file_id TEXT
         )
     """)
-    # forcesub channel (legacy, can be kept for backward compatibility)
+    # forcesub channel
     cur.execute("""
         CREATE TABLE IF NOT EXISTS forcesub (
             id INTEGER PRIMARY KEY CHECK (id=1),
@@ -76,7 +71,6 @@ def init_db():
     conn.close()
 
 def get_forcesub_channel():
-    # For backward compatibility, not used if AUTH_CHANNEL is set.
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT channel_id FROM forcesub WHERE id=1")
@@ -196,10 +190,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # ---------- FSUB check ----------
-    check_channel = AUTH_CHANNEL if AUTH_CHANNEL else get_forcesub_channel()
-    if check_channel and not await is_member(context.bot, user_id, check_channel):
+    fs_channel = get_forcesub_channel()
+    if fs_channel and not await is_member(context.bot, user_id, fs_channel):
         try:
-            chat = await context.bot.get_chat(check_channel)
+            chat = await context.bot.get_chat(fs_channel)
             username = getattr(chat, "username", "")
             if username:
                 join_link = f"https://t.me/{username}"
@@ -210,7 +204,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 # If bot is admin, provide request-to-join button
-                button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=check_channel)
+                button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
                 await query.message.reply_text(
                     "You must join the required channel to access videos.",
                     reply_markup=InlineKeyboardMarkup([[button]])
@@ -379,13 +373,13 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------- /fsub command for force subscription ----------
 async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    check_channel = AUTH_CHANNEL if AUTH_CHANNEL else get_forcesub_channel()
-    if not check_channel:
+    fs_channel = get_forcesub_channel()
+    if not fs_channel:
         await update.message.reply_text("ℹ️ Force subscription is not enabled.")
         return
 
     try:
-        chat = await context.bot.get_chat(check_channel)
+        chat = await context.bot.get_chat(fs_channel)
         title = getattr(chat, "title", "No title")
         username = getattr(chat, "username", None)
         if username:
@@ -400,10 +394,10 @@ async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Private channel: show REQUEST TO JOIN button
-            button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=check_channel)
+            button = InlineKeyboardButton("🚪 REQUEST TO JOIN", request_join_chat=fs_channel)
             msg = (
                 f"🔗 You must join the private channel: *{title}*\n"
-                f"Channel ID: `{check_channel}`"
+                f"Channel ID: `{fs_channel}`"
             )
             await update.message.reply_text(
                 msg, parse_mode='Markdown',
@@ -412,7 +406,7 @@ async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception:
         msg = (
-            f"⚠️ Force subscription is set to channel ID `{check_channel}`.\n"
+            f"⚠️ Force subscription is set to channel ID `{fs_channel}`.\n"
             "But I could not fetch its details (maybe I am not an admin there or the channel is deleted)."
         )
         await update.message.reply_text(
