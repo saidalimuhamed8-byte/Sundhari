@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
@@ -10,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import BadRequest
 
 # ---------- Config ----------
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -22,15 +24,22 @@ if not TOKEN:
 # Admins and log channel
 ADMIN_IDS = [8301447343]  # your admin ids
 LOG_CHANNEL_ID = -1002871565651  # optional
-
 BATCH_SIZE = 10  # videos per page
+
+# ---------- FSUB / Request Channel ----------
+id_pattern = re.compile(r"^-?\d+$")
+auth_channel = os.environ.get('AUTH_CHANNEL')  # Channel users must join
+AUTH_CHANNEL = int(auth_channel) if auth_channel and id_pattern.search(auth_channel) else None
+
+req_channel = os.environ.get("REQ_CHANNEL")  # Optional channel for join requests
+REQ_CHANNEL = (int(req_channel) if req_channel and id_pattern.search(req_channel) else False) if req_channel is not None else None
 
 # ---------- In-memory caches ----------
 verified_users = {}
 pending_videos = {}
 
 # ---------- DB ----------
-DB_FILE = "bot_data.db"
+DB_FILE = os.environ.get("JOIN_REQS_DB", "bot_data.db")
 
 
 def init_db():
@@ -76,22 +85,16 @@ def init_db():
     conn.close()
 
 
-# ---------- Force join helpers ----------
-def get_force_join():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT channel_id FROM force_join WHERE id=1")
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def update_force_join(channel_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("UPDATE force_join SET channel_id=? WHERE id=1", (channel_id,))
-    conn.commit()
-    conn.close()
+# ---------- FSUB helper ----------
+async def is_member(bot, user_id, channel_id):
+    """Check if a user is member of channel"""
+    if not channel_id:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except BadRequest:
+        return False
 
 
 # ---------- Chat helpers ----------
@@ -209,20 +212,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    channel_id = get_force_join()
-    if not channel_id:
-        await query.message.reply_text("⚠️ Force-join channel not set.")
-        return
 
-    if not is_pending_request(user_id, channel_id):
-        add_pending_request(user_id, channel_id)
-        keyboard = [[InlineKeyboardButton("Request Access", callback_data=f"request:{query.data}")]]
+    # ---------- FSUB check ----------
+    if AUTH_CHANNEL and not await is_member(context.bot, user_id, AUTH_CHANNEL):
+        add_pending_request(user_id, AUTH_CHANNEL)
+        chat = await context.bot.get_chat(AUTH_CHANNEL)
+        username = getattr(chat, "username", "")
         await query.message.reply_text(
-            "📌 You must request access to view videos. Click below:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            f"📌 You must join the channel first: [Join Here](https://t.me/{username})",
+            parse_mode="Markdown"
         )
         return
 
+    # ---------- Existing video logic ----------
     if query.data.startswith("request:"):
         _, data = query.data.split(":", 1)
         category, page_str = data.split(":")
@@ -246,6 +248,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await query.message.reply_text("❌ Cannot send PM. Make sure you started the bot.")
 
+    # navigation
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
@@ -275,26 +278,25 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(context.args) != 1:
-        await update.message.reply_text("Usage: /setchannel <channel_id or link>")
+        await update.message.reply_text("Usage: /setchannel <channel_id or username>")
         return
 
     input_channel = context.args[0]
 
     try:
-        if input_channel.startswith("@") or input_channel.startswith("t.me/"):
-            username = input_channel.replace("https://t.me/", "").replace("@", "")
-            chat = await context.bot.get_chat(username)
-            channel_id = chat.id
+        if input_channel.startswith("@"):
+            chat = await context.bot.get_chat(input_channel)
         else:
-            channel_id = int(input_channel)
-            chat = await context.bot.get_chat(channel_id)
+            chat = await context.bot.get_chat(int(input_channel))
+        channel_id = chat.id
 
         bot_member = await context.bot.get_chat_member(channel_id, context.bot.id)
         if bot_member.status not in ["administrator", "creator"]:
             await update.message.reply_text("❌ Bot must be admin in the channel!")
             return
 
-        update_force_join(channel_id)
+        global AUTH_CHANNEL
+        AUTH_CHANNEL = channel_id
         verified_users.clear()
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
