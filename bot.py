@@ -37,6 +37,7 @@ def init_db():
             first_name TEXT,
             username TEXT,
             is_active INTEGER DEFAULT 1,
+            stats_shown INTEGER DEFAULT 0,
             added_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -92,6 +93,21 @@ def get_chat_stats():
     conn.close()
     return stats
 
+def mark_stats_shown(chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("UPDATE chats SET stats_shown=1 WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def has_shown_stats(chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT stats_shown FROM chats WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
 # ---------- Video helpers ----------
 def add_video_to_db(category: str, file_id: str):
     conn = sqlite3.connect(DB_FILE)
@@ -107,6 +123,18 @@ def get_videos(category: str):
     results = [r[0] for r in cur.fetchall()]
     conn.close()
     return results
+
+def remove_video_from_db(category: str, index: int):
+    videos = get_videos(category)
+    if index < 0 or index >= len(videos):
+        return False
+    file_id = videos[index]
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM videos WHERE category=? AND file_id=?", (category, file_id))
+    conn.commit()
+    conn.close()
+    return True
 
 # ---------- Fsub helpers ----------
 def set_fsub_channel(invite_link: str):
@@ -154,7 +182,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     add_chat(chat.id, chat.type, getattr(chat, "first_name", None), getattr(chat, "username", None))
     
-    # Show categories directly (no join button)
+    # Show categories directly
     keyboard = [
         [InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
          InlineKeyboardButton("🆕 Latest", callback_data="latest:0")],
@@ -166,74 +194,151 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_data = context.user_data
 
-    # If user clicked continue after join
     if query.data == "continue":
         user_data["joined"] = True
         if "pending_category" in user_data:
             category = user_data.pop("pending_category")
-            await send_videos_after_join(query, context, category)
+            await send_videos_after_join(query, context, category, 0)
         return
 
-    # If user clicked a category
     if ":" in query.data:
         category, page_str = query.data.split(":")
         page = int(page_str)
 
-        # Check if user already clicked join
         if not user_data.get("joined", False):
             user_data["pending_category"] = category
             await send_join_prompt(update, context)
         else:
-            # Already joined → send videos directly
-            await send_videos_after_join(query, context, category)
+            await send_videos_after_join(query, context, category, page)
 
-async def send_videos_after_join(query, context, category):
+async def send_videos_after_join(query, context, category, page):
     videos = get_videos(category)
     if not videos:
         await query.message.reply_text("❌ No videos in this category.")
         return
 
-    start_idx = 0
-    end_idx = min(BATCH_SIZE, len(videos))
-    media = [InputMediaVideo(f, has_spoiler=False, supports_streaming=True, has_protected_content=True) for f in videos[start_idx:end_idx]]
+    start_idx = page * BATCH_SIZE
+    end_idx = start_idx + BATCH_SIZE
+    batch = videos[start_idx:end_idx]
+    media = [InputMediaVideo(f, has_spoiler=False, supports_streaming=True, has_protected_content=True) for f in batch]
 
     try:
         await context.bot.send_media_group(chat_id=query.from_user.id, media=media)
-        await query.message.reply_text("✅ Videos sent to your PM.")
     except Exception:
         await query.message.reply_text("❌ Cannot send PM. Make sure you started the bot.")
 
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
+    if end_idx < len(videos):
+        buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"{category}:{page+1}"))
+    if buttons:
+        await query.message.reply_text("Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
+
 # ---------- Admin Commands ----------
 async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Not authorized")
         return
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /fsub <invite_link>")
         return
+    set_fsub_channel(context.args[0])
+    await update.message.reply_text(f"✅ Force sub channel set to `{context.args[0]}`", parse_mode="Markdown")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if has_shown_stats(chat_id):
+        await update.message.reply_text("ℹ️ Stats already shown.")
+        return
+    users, groups = get_active_counts()
+    msg = f"📊 *Bot Stats:*\n👤 Users: {users}\n👥 Groups: {groups}"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    mark_stats_shown(chat_id)
+    await log_to_channel(context, f"📊 User {chat_id} checked bot stats.\nUsers: {users} | Groups: {groups}")
+
+async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /addvideo <category>\nThen send a video")
+        return
+    pending_videos[update.effective_user.id] = context.args[0].lower()
+    await update.message.reply_text(f"📥 Send a video to add to category *{context.args[0]}*", parse_mode="Markdown")
+
+async def bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /bulkadd <category>\nThen send multiple videos. Send /done when finished.")
+        return
+    category = context.args[0].lower()
+    pending_videos[update.effective_user.id] = {"category": category, "bulk": True}
+    await update.message.reply_text(f"📥 Send videos for category *{category}*.\nSend /done to finish.", parse_mode="Markdown")
+
+async def done_bulk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in pending_videos and isinstance(pending_videos[user_id], dict) and pending_videos[user_id].get("bulk"):
+        del pending_videos[user_id]
+        await update.message.reply_text("✅ Bulk upload finished.")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS or user_id not in pending_videos:
+        return
+    if isinstance(pending_videos[user_id], dict):
+        category = pending_videos[user_id]["category"]
+    else:
+        category = pending_videos[user_id]
+    if update.message.video:
+        add_video_to_db(category, update.message.video.file_id)
+        await update.message.reply_text(f"✅ Video added to category *{category}*", parse_mode="Markdown")
+
+async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /removevideo <category> <index>")
+        return
+    category = context.args[0].lower()
     try:
-        invite_link = context.args[0]
-        set_fsub_channel(invite_link)
-        await update.message.reply_text(f"✅ Force sub channel set to `{invite_link}`", parse_mode="Markdown")
+        index = int(context.args[1]) - 1
+        if remove_video_from_db(category, index):
+            await update.message.reply_text(f"✅ Removed video {index+1} from category *{category}*", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Invalid index")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
-# Admin video commands (addvideo, bulkadd, done_bulk, removevideo, getid) can be added here
+# ---------- Chat member tracking ----------
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    status = update.my_chat_member.new_chat_member.status
+    if status in ("member", "administrator"):
+        add_chat(chat.id, chat.type, getattr(chat, "title", None), getattr(chat, "username", None))
+    elif status in ("left", "kicked"):
+        update_chat_status(chat.id, 0)
 
 # ---------- Main ----------
 def main():
     init_db()
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("fsub", fsub_command))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("addvideo", addvideo))
+    app.add_handler(CommandHandler("bulkadd", bulkadd))
+    app.add_handler(CommandHandler("done", done_bulk))
+    app.add_handler(CommandHandler("removevideo", removevideo))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video, block=False))
     app.add_handler(CallbackQueryHandler(button_handler))
-    # Add admin/video handlers here
+    app.add_handler(ChatMemberHandler(chat_member_update, chat_member_types=["my_chat_member"]))
 
     if WEBHOOK_URL:
         app.run_webhook(
