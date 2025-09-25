@@ -47,6 +47,12 @@ def init_db():
             file_id TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fsub_channel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -102,6 +108,35 @@ def get_videos(category: str):
     conn.close()
     return results
 
+# ---------- Fsub helpers ----------
+def set_fsub_channel(chat_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM fsub_channel")
+    cur.execute("INSERT INTO fsub_channel (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def get_fsub_channel() -> int:
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id FROM fsub_channel LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+async def send_join_message(update, context):
+    channel_id = get_fsub_channel()
+    if not channel_id:
+        return
+    invite_link = f"https://t.me/c/{str(channel_id)[4:]}"  # convert private channel ID
+    keyboard = [[InlineKeyboardButton("📢 Join Channel", url=invite_link)]]
+    kb = InlineKeyboardMarkup(keyboard)
+    if update.message:
+        await update.message.reply_text("⚠️ Please join the channel to use the bot:", reply_markup=kb)
+    elif update.callback_query:
+        await update.callback_query.message.reply_text("⚠️ Please join the channel to use the bot:", reply_markup=kb)
+
 # ---------- Logging ----------
 async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     if not LOG_CHANNEL_ID:
@@ -113,9 +148,9 @@ async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
 
 # ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_join_message(update, context)  # Send join channel button
     chat = update.effective_chat
     add_chat(chat.id, chat.type, getattr(chat, "first_name", None), getattr(chat, "username", None))
-
     users, groups = get_active_counts()
     if chat.type == "private":
         name = chat.first_name or ""
@@ -128,21 +163,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Now: 👤 {users} users | 👥 {groups} groups"
         )
         await log_to_channel(context, log_text)
-
+    # Show categories
     keyboard = [
         [InlineKeyboardButton("🏝 Mallu", callback_data="mallu:0"),
          InlineKeyboardButton("🆕 Latest", callback_data="latest:0")],
         [InlineKeyboardButton("🇮🇳 Desi", callback_data="desi:0"),
          InlineKeyboardButton("🔥 Trending", callback_data="trending:0")],
     ]
-    await update.message.reply_text("👋 Welcome! Choose a category:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👋 Choose a category:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_join_message(update, context)  # Always show join button first
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
 
-    # ---------- Video pagination ----------
     category, page_str = query.data.split(":")
     page = int(page_str)
     videos = get_videos(category)
@@ -169,7 +204,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if buttons:
         await query.message.reply_text("Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
 
-# ---------- Admin / Bot commands ----------
+# ---------- Admin Commands ----------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Not authorized.")
@@ -247,11 +282,25 @@ async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"📌 This chat ID is: `{chat.id}`", parse_mode="Markdown")
 
+async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /fsub <channel_id>")
+        return
+    try:
+        channel_id = int(context.args[0])
+        set_fsub_channel(channel_id)
+        await update.message.reply_text(f"✅ Force sub channel set to `{channel_id}`", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
 # ---------- Chat member tracking ----------
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     status = update.my_chat_member.new_chat_member.status
-
     if status in ("member", "administrator"):
         add_chat(chat.id, chat.type, getattr(chat, "title", None), getattr(chat, "username", None))
     elif status in ("left", "kicked"):
@@ -263,7 +312,8 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("fsub", fsub_command))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^[a-z]+:\d+$"))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("addvideo", addvideo))
     app.add_handler(CommandHandler("bulkadd", bulkadd))
