@@ -1,49 +1,53 @@
-# fsub.py
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import sqlite3
+from telegram import Update
 from telegram.ext import ContextTypes
-from telegram.error import BadRequest
 
-# Private channel setup
-REQUIRED_CHANNELS = {
-    "main": {
-        "chat_id": -1001234567890,  # Replace with your private channel ID
-        "invite_link": "https://t.me/+abcdEfGhIjkLmNoP"  # Replace with your invite link
-    }
-}
+DB_FILE = "bot_data.db"
 
-async def check_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+# ---------- DB Helper ----------
+def init_fsub_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fsub_channel (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def set_fsub_channel(chat_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM fsub_channel")  # only one channel at a time
+    cur.execute("INSERT INTO fsub_channel (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def get_fsub_channel() -> int:
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id FROM fsub_channel LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return row[0]
+    return None
+
+# ---------- Command Handler ----------
+async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    bot = context.bot
-
+    ADMIN_IDS = [8301447343]  # replace with your admin IDs
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Not authorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /fsub <channel_id>")
+        return
     try:
-        for _, data in REQUIRED_CHANNELS.items():
-            chat_id = data["chat_id"]
-            member = await bot.get_chat_member(chat_id, user_id)
-
-            if member.status in ("left", "kicked"):
-                await send_join_message(update, context)
-                return False
-    except BadRequest:
-        await send_join_message(update, context)
-        return False
-
-    return True
-
-
-async def send_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = []
-    for _, data in REQUIRED_CHANNELS.items():
-        buttons.append([InlineKeyboardButton("📢 Join Channel", url=data["invite_link"])])
-
-    keyboard = InlineKeyboardMarkup(buttons)
-
-    if update.message:
-        await update.message.reply_text(
-            "⚠️ You must join our private channel to use this bot.",
-            reply_markup=keyboard
-        )
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(
-            "⚠️ You must join our private channel to use this bot.",
-            reply_markup=keyboard
-        )
+        channel_id = int(context.args[0])
+        set_fsub_channel(channel_id)
+        await update.message.reply_text(f"✅ Force sub channel set to `{channel_id}`", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
