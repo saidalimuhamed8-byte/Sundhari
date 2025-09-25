@@ -167,11 +167,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    user_data = context.user_data
+
     # If user clicked continue after join
     if query.data == "continue":
-        # Send videos after join
-        if "pending_category" in context.user_data:
-            category = context.user_data.pop("pending_category")
+        user_data["joined"] = True
+        if "pending_category" in user_data:
+            category = user_data.pop("pending_category")
             await send_videos_after_join(query, context, category)
         return
 
@@ -180,16 +182,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category, page_str = query.data.split(":")
         page = int(page_str)
 
-        # Save category in user_data and show join button first
-        context.user_data["pending_category"] = category
-        await send_join_prompt(update, context)
+        # Check if user already clicked join
+        if not user_data.get("joined", False):
+            user_data["pending_category"] = category
+            await send_join_prompt(update, context)
+        else:
+            # Already joined → send videos directly
+            await send_videos_after_join(query, context, category)
 
 async def send_videos_after_join(query, context, category):
     videos = get_videos(category)
     if not videos:
         await query.message.reply_text("❌ No videos in this category.")
         return
-    media = [InputMediaVideo(f, has_spoiler=False, supports_streaming=True, has_protected_content=True) for f in videos[:BATCH_SIZE]]
+
+    start_idx = 0
+    end_idx = min(BATCH_SIZE, len(videos))
+    media = [InputMediaVideo(f, has_spoiler=False, supports_streaming=True, has_protected_content=True) for f in videos[start_idx:end_idx]]
+
     try:
         await context.bot.send_media_group(chat_id=query.from_user.id, media=media)
         await query.message.reply_text("✅ Videos sent to your PM.")
@@ -212,7 +222,7 @@ async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
-# Add other admin commands (addvideo, bulkadd, done_bulk, removevideo, getid) here as needed
+# Admin video commands (addvideo, bulkadd, done_bulk, removevideo, getid) can be added here
 
 # ---------- Main ----------
 def main():
@@ -223,7 +233,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("fsub", fsub_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-    # Add other admin / video handlers here
+    # Add admin/video handlers here
 
     if WEBHOOK_URL:
         app.run_webhook(
