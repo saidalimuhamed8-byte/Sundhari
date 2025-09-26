@@ -26,7 +26,7 @@ PORT = int(os.environ.get("PORT", 8000))
 
 ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
 DB_FILE = "bot.db"
-LOG_CHANNEL_ID = -1002298026470  # Replace with your log channel ID
+LOG_CHANNEL_ID = --1002871565651  # Replace with your log channel ID
 
 # ---------- Logging ----------
 logging.basicConfig(
