@@ -20,22 +20,15 @@ ADMIN_ID = 5409412733
 LOG_CHANNEL = -1002871565651
 
 # --- Logging ---
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 
 # --- Database ---
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
-
-# Users table
 cursor.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)""")
-# Config table (force channel)
 cursor.execute("""CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)""")
-# Videos table
-cursor.execute("""CREATE TABLE IF NOT EXISTS videos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT,
-    file_id TEXT
-)""")
 conn.commit()
 
 # --- Helper functions ---
@@ -48,22 +41,13 @@ def set_force_channel(channel):
     cursor.execute("INSERT OR REPLACE INTO config(key, value) VALUES('force_channel', ?)", (channel,))
     conn.commit()
 
-def add_video(category, file_id):
-    cursor.execute("INSERT INTO videos(category, file_id) VALUES(?, ?)", (category, file_id))
-    conn.commit()
-
-def remove_video(category, file_id):
-    cursor.execute("DELETE FROM videos WHERE category=? AND file_id=?", (category, file_id))
-    conn.commit()
-
-def get_videos(category):
-    cursor.execute("SELECT file_id FROM videos WHERE category=?", (category,))
-    return [row[0] for row in cursor.fetchall()]
-
 # --- Start Command ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    cursor.execute("INSERT OR IGNORE INTO users(user_id, username) VALUES(?, ?)", (user.id, user.username))
+    cursor.execute(
+        "INSERT OR IGNORE INTO users(user_id, username) VALUES(?, ?)",
+        (user.id, user.username),
+    )
     conn.commit()
 
     # Log first-time user
@@ -75,7 +59,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             member = await context.bot.get_chat_member(force_channel, user.id)
             if member.status in ["left", "kicked"]:
-                await update.message.reply_text(f"⚠️ You must join the channel {force_channel} first to use this bot.")
+                await update.message.reply_text(
+                    f"⚠️ You must join the channel {force_channel} first to use this bot."
+                )
                 return
         except BadRequest:
             await update.message.reply_text(f"⚠️ Force channel {force_channel} is invalid.")
@@ -87,7 +73,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ Under 18", callback_data="under_18")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("⚠️ You must be 18+ to use this bot. Please verify:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "⚠️ You must be 18+ to use this bot. Please verify:", reply_markup=reply_markup
+    )
 
 # --- Callback Button Handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,21 +97,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("✅ Age verified!\n\nPlease select a category:", reply_markup=reply_markup)
+        await query.edit_message_text(
+            "✅ Age verified!\n\nPlease select a category:",
+            reply_markup=reply_markup
+        )
 
     elif query.data == "under_18":
         await query.edit_message_text("❌ You must be 18+ to use this bot.")
 
     elif query.data.startswith("category_"):
-        category = query.data.split("_")[1].lower()
-        videos = get_videos(category)
-        if not videos:
-            await query.edit_message_text(f"🎯 You selected: {category.capitalize()}\nNo videos uploaded yet.")
-            return
-
-        for file_id in videos:
-            await context.bot.send_video(query.message.chat_id, video=file_id)
-        await query.edit_message_text(f"🎯 Sent all videos in category: {category.capitalize()}")
+        category = query.data.split("_")[1].capitalize()
+        await query.edit_message_text(f"🎯 You selected: {category}\nContent coming soon!")
 
 # --- Admin Commands ---
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,44 +136,20 @@ async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_force_channel(channel)
     await update.message.reply_text(f"✅ Force channel set to: {channel}")
 
-# --- Bulk Add Videos ---
-bulk_category = None
+# --- Placeholder bulk commands ---
 async def bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bulk_category
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Not authorized.")
-        return
-    if not context.args:
-        await update.message.reply_text("Usage: /bulkadd <category>")
-        return
-    bulk_category = context.args[0].lower()
-    await update.message.reply_text(f"📥 Send videos now to add to category: {bulk_category}")
+    await update.message.reply_text("Bulk add video feature coming soon!")
 
-# --- Receive Videos for Bulk Add ---
-async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bulk_category
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not bulk_category:
-        return
-    file_id = update.message.video.file_id
-    add_video(bulk_category, file_id)
-    await update.message.reply_text(f"✅ Video added to category: {bulk_category}")
-
-# --- Remove Video ---
 async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Not authorized.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /removevideo <category> <file_id>")
-        return
-    category, file_id = context.args[0].lower(), context.args[1]
-    remove_video(category, file_id)
-    await update.message.reply_text(f"🗑 Removed video from category: {category}")
+    await update.message.reply_text("Remove video feature coming soon!")
+
+async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Video received! Processing...")
 
 # --- Main ---
-async def main():
+if __name__ == "__main__":
+    logging.info("Starting bot...")
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Command handlers
@@ -202,16 +162,13 @@ async def main():
 
     # Callback buttons
     app.add_handler(CallbackQueryHandler(button_handler))
+
     # Video messages
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
 
-    # Webhook
-    await app.run_webhook(
+    # Start webhook directly
+    app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
         webhook_url=f"{WEBHOOK_URL}{TOKEN}"
     )
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
