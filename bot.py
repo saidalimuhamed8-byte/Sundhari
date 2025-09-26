@@ -24,7 +24,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8000))
 
-ADMIN_IDS = [5072320354]  # Replace with your Telegram user ID
+ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
 DB_FILE = "bot.db"
 LOG_CHANNEL_ID = -1002298026470  # Replace with your log channel ID
 
