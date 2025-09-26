@@ -2,6 +2,7 @@ import os
 import sys
 import sqlite3
 import logging
+import nest_asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -156,6 +157,16 @@ async def main():
         webhook_url=f"{WEBHOOK_URL}{TOKEN}"
     )
 
+# --- Run Bot ---
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        nest_asyncio.apply()
+        loop.create_task(main())
+    else:
+        import asyncio
+        asyncio.run(main())
