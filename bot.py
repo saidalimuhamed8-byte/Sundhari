@@ -7,94 +7,112 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
-    filters
+    filters,
+)
+import logging
+
+# --- Config ---
+TOKEN = os.environ.get("BOT_TOKEN", "7515243964:AAHGtdybkCP6SNirAloWHFI8CmYN_LefQFk")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://naughty-suzette-sasis-fdd9317b.koyeb.app/")
+ADMIN_ID = 5409412733
+LOG_CHANNEL = -1002871565651
+
+# --- Logging ---
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# --- Environment Variables ---
-TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://yourdomain.com
-PORT = int(os.environ.get("PORT", 8000))
-
-# --- Database Setup ---
-conn = sqlite3.connect("sundhari.db")
+# --- Database ---
+conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users(
-    user_id INTEGER PRIMARY KEY,
-    username TEXT
+cursor.execute(
+    """CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)"""
 )
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS videos(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id TEXT
-)
-""")
 conn.commit()
 
-# --- Handlers ---
-
+# --- Start Command ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     cursor.execute("INSERT OR IGNORE INTO users(user_id, username) VALUES(?, ?)", (user.id, user.username))
     conn.commit()
-    await update.message.reply_text("👋 Hello! Welcome to Sundhari Bot.")
+    
+    # Log in channel
+    await context.bot.send_message(LOG_CHANNEL, f"👤 User started bot: {user.first_name} (@{user.username})")
 
-async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Send the video file ID after /addvideo command.")
-        return
-    file_id = context.args[0]
-    cursor.execute("INSERT INTO videos(file_id) VALUES(?)", (file_id,))
-    conn.commit()
-    await update.message.reply_text("✅ Video added successfully!")
+    keyboard = [
+        [InlineKeyboardButton("✅ I am 18+", callback_data="age_verified")],
+        [InlineKeyboardButton("❌ Under 18", callback_data="under_18")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("⚠️ You must be 18+ to use this bot. Please verify:", reply_markup=reply_markup)
 
-async def bulk_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Send multiple video file IDs separated by space.")
-        return
-    for file_id in context.args:
-        cursor.execute("INSERT INTO videos(file_id) VALUES(?)", (file_id,))
-    conn.commit()
-    await update.message.reply_text("✅ Bulk videos added successfully!")
+# --- Callback Button Handler ---
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-async def remove_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Send the video ID to remove.")
-        return
-    video_id = context.args[0]
-    cursor.execute("DELETE FROM videos WHERE id=?", (video_id,))
-    conn.commit()
-    await update.message.reply_text("✅ Video removed successfully!")
+    if query.data == "age_verified":
+        keyboard = [
+            [
+                InlineKeyboardButton("🏝 Mallu", callback_data="category_mallu"),
+                InlineKeyboardButton("🇮🇳 Desi", callback_data="category_desi")
+            ],
+            [
+                InlineKeyboardButton("🔥 Trending", callback_data="category_trending"),
+                InlineKeyboardButton("🆕 Latest", callback_data="category_latest")
+            ],
+            [
+                InlineKeyboardButton("💎 Premium", callback_data="category_premium")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "✅ Age verified!\n\nPlease select a category:",
+            reply_markup=reply_markup
+        )
 
-async def list_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT id, file_id FROM videos")
-    videos = cursor.fetchall()
-    if not videos:
-        await update.message.reply_text("No videos added yet.")
+    elif query.data == "under_18":
+        await query.edit_message_text("❌ You must be 18+ to use this bot.")
+
+    elif query.data.startswith("category_"):
+        category = query.data.split("_")[1].capitalize()
+        await query.edit_message_text(f"🎯 You selected: {category}\nContent coming soon!")
+
+# --- Admin Commands ---
+async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized.")
         return
-    msg = "\n".join([f"ID: {vid[0]}, FileID: {vid[1]}" for vid in videos])
-    await update.message.reply_text(msg)
+    await update.message.reply_text("🔄 Restarting bot...")
+    os.execv(__file__, ["python"] + sys.argv)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ You are not authorized.")
+        return
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    await update.message.reply_text(f"👥 Total users: {total_users}")
 
 # --- Main Function ---
-def main():
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("addvideo", add_video))
-    app.add_handler(CommandHandler("bulkadd", bulk_add))
-    app.add_handler(CommandHandler("removevideo", remove_video))
-    app.add_handler(CommandHandler("listvideos", list_videos))
+    app.add_handler(CommandHandler("restart", restart))
+    app.add_handler(CommandHandler("stats", stats))
 
-    # Run webhook
-    app.run_webhook(
+    # Callback buttons
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Webhook
+    await app.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+        port=int(os.environ.get("PORT", 8000)),
+        webhook_url=f"{WEBHOOK_URL}{TOKEN}"
     )
 
 if __name__ == "__main__":
-    main()
-
+    import asyncio
+    asyncio.run(main())
