@@ -2,6 +2,7 @@ import os
 import sys
 import sqlite3
 import logging
+import asyncio
 import nest_asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -26,7 +27,7 @@ logging.basicConfig(
 )
 
 # --- Database ---
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)""")
 cursor.execute("""CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)""")
@@ -168,5 +169,4 @@ if __name__ == "__main__":
         nest_asyncio.apply()
         loop.create_task(main())
     else:
-        import asyncio
         asyncio.run(main())
