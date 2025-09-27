@@ -1,16 +1,9 @@
-# bot.py - full updated version with instant verification
 import os
 import sys
 import sqlite3
 import logging
 from typing import List
-
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    InputMediaVideo,
-)
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -23,10 +16,9 @@ from telegram.ext import (
 # --- Config / env ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 APP_URL = os.environ.get("APP_URL", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
 LOG_CHANNEL = os.environ.get("LOG_CHANNEL")
-
 if LOG_CHANNEL:
     try:
         LOG_CHANNEL = int(LOG_CHANNEL)
@@ -34,7 +26,7 @@ if LOG_CHANNEL:
         pass
 
 # --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- DB ---
@@ -49,10 +41,10 @@ CREATE TABLE IF NOT EXISTS users(
     username TEXT,
     first_name TEXT,
     age_confirmed INTEGER DEFAULT 0,
-    verified INTEGER DEFAULT 0,
-    last_category TEXT
+    verified INTEGER DEFAULT 0
 )
 """)
+
 cur.execute("""
 CREATE TABLE IF NOT EXISTS videos(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +52,7 @@ CREATE TABLE IF NOT EXISTS videos(
     category TEXT
 )
 """)
+
 cur.execute("""
 CREATE TABLE IF NOT EXISTS config(
     key TEXT PRIMARY KEY,
@@ -79,20 +72,21 @@ def set_config(key: str, value: str):
     conn.commit()
 
 def add_video_to_db(file_id: str, category: str):
-    cur.execute("INSERT INTO videos(file_id, category) VALUES(?, ?)", (file_id, category))
+    cur.execute("INSERT INTO videos (file_id, category) VALUES (?, ?)", (file_id, category))
     conn.commit()
 
 def remove_video_from_db(category: str, index: int) -> bool:
     cur.execute("SELECT id FROM videos WHERE category = ? ORDER BY id ASC", (category,))
     rows = cur.fetchall()
     if 0 <= index < len(rows):
-        cur.execute("DELETE FROM videos WHERE id = ?", (rows[index][0],))
+        rowid = rows[index][0]
+        cur.execute("DELETE FROM videos WHERE id = ?", (rowid,))
         conn.commit()
         return True
     return False
 
 def get_videos_by_category(category: str) -> List[str]:
-    cur.execute("SELECT file_id FROM videos WHERE category=? ORDER BY id ASC", (category,))
+    cur.execute("SELECT file_id FROM videos WHERE category = ? ORDER BY id ASC", (category,))
     return [r[0] for r in cur.fetchall()]
 
 def paginate_list(items: List, page: int, page_size: int = 10) -> List:
@@ -106,17 +100,12 @@ async def safe_send_log(bot, text: str):
     try:
         await bot.send_message(LOG_CHANNEL, text)
     except Exception as e:
-        logger.warning("Failed to send log message: %s", e)
+        logger.warning("Failed to send log: %s", e)
 
-async def try_verify_user_in_pending(app, chat_identifier, user_id: int) -> bool:
-    """
-    Check if user is in pending join requests of the channel.
-    Works only if bot is admin.
-    """
+async def try_verify_user_via_chat_member(app, chat_identifier, user_id: int) -> bool:
     try:
-        # Only works if numeric or username
         if isinstance(chat_identifier, str) and chat_identifier.startswith("https://"):
-            return False  # cannot use invite link
+            return False
         if isinstance(chat_identifier, str) and chat_identifier.lstrip("-").isdigit():
             chat_id = int(chat_identifier)
         else:
@@ -124,11 +113,8 @@ async def try_verify_user_in_pending(app, chat_identifier, user_id: int) -> bool
         member = await app.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         if member.status in ("member", "administrator", "creator"):
             return True
-        # if status is "pending" or "restricted" we can consider verified in pending
-        if member.status == "restricted" or member.status == "left":
-            return False
     except Exception as e:
-        logger.debug("Pending verification check failed: %s", e)
+        logger.debug("Verification failed: %s", e)
     return False
 
 # --- Handlers ---
@@ -137,17 +123,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or ""
     first_name = user.first_name or ""
-
-    cur.execute("INSERT OR IGNORE INTO users(user_id, username, first_name) VALUES (?, ?, ?)",
+    cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
                 (user_id, username, first_name))
     conn.commit()
-    await safe_send_log(context.bot, f"👤 New /start: {first_name} (@{username}) — id: {user_id}")
+    await safe_send_log(context.bot, f"👤 /start: {first_name} (@{username}) — id:{user_id}")
 
     welcome = (
         "🔥 *Welcome!* 🔥\n\n"
         "Your personal adult playground — available *24/7*.\n"
-        "Safe, anonymous, and spicy content.\n\n"
-        "👉 *You must be 18 or older to use this bot.*"
+        "You must be 18+ to continue."
     )
     keyboard = [[InlineKeyboardButton("✅ I am 18 or older", callback_data="age_confirm")]]
     await update.message.reply_markdown(welcome, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -158,18 +142,16 @@ async def age_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = q.from_user.id
     cur.execute("UPDATE users SET age_confirmed=1 WHERE user_id=?", (user_id,))
     conn.commit()
-
     keyboard = [
         [InlineKeyboardButton("🏝 Mallu", callback_data="cat_Mallu"),
          InlineKeyboardButton("🇮🇳 Desi", callback_data="cat_Desi")],
         [InlineKeyboardButton("🔥 Trending", callback_data="cat_Trending"),
          InlineKeyboardButton("🆕 Latest", callback_data="cat_Latest")],
-        [InlineKeyboardButton("💎 Premium", callback_data="cat_Premium")],
+        [InlineKeyboardButton("💎 Premium", callback_data="cat_Premium")]
     ]
-    await q.edit_message_text("✅ Age verified!\n\nSelect a category:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text("✅ Age verified!\nSelect a category:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle category selection and auto-verification flow."""
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
@@ -177,63 +159,201 @@ async def category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     fsub = get_config("fsub")
     cur.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    r = cur.fetchone()
-    verified = r[0] == 1 if r else False
+    verified = cur.fetchone()[0] == 1 if cur.fetchone() else False
 
-    # Attempt instant verification if fsub set
-    if fsub and not verified:
-        ok = await try_verify_user_in_pending(context.application, fsub, user_id)
+    if not verified and fsub:
+        ok = await try_verify_user_via_chat_member(context.application, fsub, user_id)
         if ok:
             verified = True
-            cur.execute("UPDATE users SET verified=1, last_category=? WHERE user_id=?", (category, user_id))
+            cur.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
             conn.commit()
-        else:
-            kb = [[InlineKeyboardButton("📩 Request to Join Channel", url=fsub)]]
-            await q.edit_message_text(
-                f"🔒 To access *{category}* videos you must request access first.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
-            return
 
-    if verified:
-        cur.execute("UPDATE users SET last_category=? WHERE user_id=?", (category, user_id))
-        conn.commit()
-        await send_videos_page(user_id, context, category, 0)
+    if not verified:
+        link = fsub or "https://t.me/yourchannel"
+        kb = [[InlineKeyboardButton("📩 Request to Join Channel", url=link)],
+              [InlineKeyboardButton("🔁 I've requested — Check again", callback_data=f"verifynow_{category}_0")]]
+        await q.edit_message_text(f"🔒 Access to *{category}* requires joining the channel.",
+                                  parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        return
 
-async def send_videos_page(user_id, context, category, page):
     all_videos = get_videos_by_category(category)
     if not all_videos:
-        await context.bot.send_message(chat_id=user_id, text=f"⚠️ No videos available for *{category}*.", parse_mode="Markdown")
+        await q.edit_message_text(f"⚠️ No videos available for *{category}*", parse_mode="Markdown")
         return
-    chunk = paginate_list(all_videos, page)
-    media = [InputMediaVideo(media=v) for v in chunk]
+    page = 0
+    chunk = paginate_list(all_videos, page, 10)
+    media = [InputMediaVideo(media=vid) for vid in chunk]
     await context.bot.send_message(chat_id=user_id, text=f"📂 *{category}* — Page {page+1}", parse_mode="Markdown")
     try:
         await context.bot.send_media_group(chat_id=user_id, media=media)
-    except Exception:
+    except:
         for m in media:
             await context.bot.send_video(chat_id=user_id, video=m.media)
-    nav_kb = [
-        [InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{category}_{page}"),
-         InlineKeyboardButton("Next ➡️", callback_data=f"next_{category}_{page}")]
-    ]
+
+    nav_kb = [[InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{category}_{page}"),
+               InlineKeyboardButton("Next ➡️", callback_data=f"next_{category}_{page}")]]
     await context.bot.send_message(chat_id=user_id, text="Navigate:", reply_markup=InlineKeyboardMarkup(nav_kb))
+
+async def verifynow_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    parts = q.data.split("_")
+    category = parts[1] if len(parts) > 1 else "General"
+    fsub = get_config("fsub")
+    if not fsub:
+        await q.edit_message_text("❗ Force-sub not set.")
+        return
+    ok = await try_verify_user_via_chat_member(context.application, fsub, user_id)
+    if ok:
+        cur.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
+        conn.commit()
+        await q.edit_message_text("✅ Verified! Sending videos...")
+        await category_cb(update, context)
+    else:
+        await q.answer("Still not verified. Make sure you requested.", show_alert=True)
 
 async def nav_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
-    parts = q.data.split("_")
-    if len(parts) != 3:
-        return
-    direction, category, page = parts
+    direction, category, page = q.data.split("_")
     page = int(page)
-    page = page + 1 if direction == "next" else max(page - 1, 0)
-    await send_videos_page(user_id, context, category, page)
+    if direction == "next":
+        page += 1
+    else:
+        page = max(page - 1, 0)
+    all_videos = get_videos_by_category(category)
+    chunk = paginate_list(all_videos, page, 10)
+    if not chunk:
+        await q.answer("No videos on this page.", show_alert=True)
+        return
+    media = [InputMediaVideo(media=v) for v in chunk]
+    await context.bot.send_message(chat_id=user_id, text=f"📂 *{category}* — Page {page+1}", parse_mode="Markdown")
+    try:
+        await context.bot.send_media_group(chat_id=user_id, media=media)
+    except:
+        for m in media:
+            await context.bot.send_video(chat_id=user_id, video=m.media)
+    nav_kb = [[InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{category}_{page}"),
+               InlineKeyboardButton("Next ➡️", callback_data=f"next_{category}_{page}")]]
+    await context.bot.send_message(chat_id=user_id, text="Navigate:", reply_markup=InlineKeyboardMarkup(nav_kb))
 
 # --- Admin commands ---
 async def addvideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ Unauthorized.")
-    context.user
+    context.user_data["adding_single"] = True
+    await update.message.reply_text("📤 Reply/send a video with caption as category. /cancel to abort.")
+
+async def bulkadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Unauthorized.")
+    if not context.args:
+        return await update.message.reply_text("Usage: /bulkadd <category>")
+    context.user_data["bulk_mode"] = True
+    context.user_data["bulk_category"] = context.args[0]
+    await update.message.reply_text(f"📥 Bulk add started for *{context.args[0]}*. Send videos, /done to finish.", parse_mode="Markdown")
+
+async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if context.user_data.get("bulk_mode"):
+        context.user_data.pop("bulk_mode")
+        context.user_data.pop("bulk_category")
+        await update.message.reply_text("✅ Bulk add finished.")
+    else:
+        await update.message.reply_text("No bulk add in progress.")
+
+async def video_receiver(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        return
+    file_id = update.message.video.file_id
+    if context.user_data.get("adding_single"):
+        category = update.message.caption or ""
+        if not category:
+            await update.message.reply_text("Send caption as category.")
+            return
+        add_video_to_db(file_id, category)
+        context.user_data.pop("adding_single")
+        await update.message.reply_text(f"✅ Video added to *{category}*", parse_mode="Markdown")
+        return
+    if context.user_data.get("bulk_mode"):
+        category = context.user_data.get("bulk_category")
+        add_video_to_db(file_id, category)
+        await update.message.reply_text(f"✅ Bulk: saved to *{category}*", parse_mode="Markdown")
+
+async def removevideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Unauthorized.")
+    if len(context.args) != 2:
+        return await update.message.reply_text("Usage: /removevideo <category> <index>")
+    category = context.args[0]
+    index = int(context.args[1])
+    ok = remove_video_from_db(category, index)
+    if ok:
+        await update.message.reply_text(f"🗑️ Removed video {index} from *{category}*", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❗ Invalid category or index.")
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    cur.execute("SELECT COUNT(*) FROM users")
+    users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM videos")
+    vids = cur.fetchone()[0]
+    await update.message.reply_text(f"📊 Users: {users}\n🎞 Videos: {vids}")
+
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await safe_send_log(context.bot, f"⚠️ Bot restart requested by admin {update.effective_user.id}")
+    await update.message.reply_text("🔄 Restarting... (clean)")
+    await context.application.shutdown()
+    await context.application.stop()
+    sys.exit(0)
+
+async def fsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        return await update.message.reply_text("Usage: /fsub <link>")
+    link = context.args[0]
+    set_config("fsub", link)
+    cur.execute("UPDATE users SET verified=0")
+    conn.commit()
+    await update.message.reply_text(f"✅ Force-sub channel set: {link}\nOld verifications cleared.")
+
+# --- App bootstrap ---
+def build_app():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # user
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(age_confirm_cb, pattern="^age_confirm$"))
+    app.add_handler(CallbackQueryHandler(category_cb, pattern="^cat_"))
+    app.add_handler(CallbackQueryHandler(verifynow_cb, pattern="^verifynow_"))
+    app.add_handler(CallbackQueryHandler(nav_cb, pattern="^(next|prev)_"))
+    # admin
+    app.add_handler(CommandHandler("addvideo", addvideo_cmd))
+    app.add_handler(CommandHandler("bulkadd", bulkadd_cmd))
+    app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("removevideo", removevideo_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("restart", restart_cmd))
+    app.add_handler(CommandHandler("fsub", fsub_cmd))
+    # video receiver
+    app.add_handler(MessageHandler(filters.VIDEO & filters.User(user_id=ADMIN_ID), video_receiver))
+    return app
+
+def main():
+    app = build_app()
+    if not APP_URL:
+        logger.error("APP_URL not set.")
+        sys.exit(1)
+    logger.info("Starting bot with webhook at %s", APP_URL)
+    app.run_webhook(listen="0.0.0.0", port=PORT, url_path="", webhook_url=APP_URL)
+
+if __name__ == "__main__":
+    main()
