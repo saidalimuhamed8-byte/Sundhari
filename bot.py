@@ -40,8 +40,7 @@ CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER UNIQUE,
     username TEXT,
     first_name TEXT,
-    age_confirmed INTEGER DEFAULT 0,
-    verified INTEGER DEFAULT 0
+    age_confirmed INTEGER DEFAULT 0
 )
 """)
 
@@ -102,76 +101,11 @@ async def safe_send_log(bot, text: str):
     except Exception as e:
         logger.warning("Failed to send log: %s", e)
 
-async def try_verify_user_via_chat_member(app, chat_identifier, user_id: int) -> bool:
-    try:
-        if isinstance(chat_identifier, str) and chat_identifier.startswith("https://"):
-            return False
-        if isinstance(chat_identifier, str) and chat_identifier.lstrip("-").isdigit():
-            chat_id = int(chat_identifier)
-        else:
-            chat_id = chat_identifier
-        member = await app.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        if member.status in ("member", "administrator", "creator"):
-            return True
-    except Exception as e:
-        logger.debug("Verification failed: %s", e)
-    return False
+# --- Force-sub tracking ---
+force_requested = {}  # user_id -> category
 
-# --- fsub helper ---
-async def check_fsub_user(app, user_id: int) -> bool:
-    fsub = get_config("fsub")
-    if not fsub:
-        return True  # No fsub set
-    try:
-        chat_id = int(fsub) if fsub.lstrip("-").isdigit() else fsub
-        member = await app.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        if member.status in ("member", "administrator", "creator"):
-            cur.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
-            conn.commit()
-            return True
-    except Exception as e:
-        logger.warning("Fsub verification failed: %s", e)
-    return False
-
-async def ensure_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-
-    if user_id == ADMIN_ID:
-        return True
-
-    cur.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    verified = row[0] == 1 if row else False
-    if verified:
-        return True
-
-    if not await check_fsub_user(context.application, user_id):
-        fsub = get_config("fsub") or "https://t.me/yourchannel"
-        kb = [
-            [InlineKeyboardButton("📩 Join Channel", url=fsub)],
-            [InlineKeyboardButton("🔁 I've joined — Verify", callback_data="verifynow_General_0")]
-        ]
-        try:
-            if update.message:
-                await update.message.reply_text(
-                    "🔒 You must join the channel to use this bot.",
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
-            elif update.callback_query:
-                await update.callback_query.edit_message_text(
-                    "🔒 You must join the channel to use this bot.",
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
-        except:
-            pass
-        return False
-    return True
-
-# --- Handlers ---
+# --- User Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_fsub(update, context):
-        return
     user = update.effective_user
     user_id = user.id
     username = user.username or ""
@@ -192,13 +126,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_markdown(welcome, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def age_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_fsub(update, context):
-        return
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
     cur.execute("UPDATE users SET age_confirmed=1 WHERE user_id=?", (user_id,))
     conn.commit()
+
     keyboard = [
         [InlineKeyboardButton("🏝 Mallu", callback_data="cat_Mallu"),
          InlineKeyboardButton("🇮🇳 Desi", callback_data="cat_Desi")],
@@ -209,12 +142,59 @@ async def age_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("✅ Age verified!\nSelect a category:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_fsub(update, context):
-        return
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
     category = q.data.split("_", 1)[1]
+
+    all_videos = get_videos_by_category(category)
+    if not all_videos:
+        await q.edit_message_text(f"⚠️ No videos available for *{category}*", parse_mode="Markdown")
+        return
+
+    fsub_link = get_config("fsub") or "https://t.me/yourchannel"
+    kb = [[InlineKeyboardButton("📩 Request to Join Channel", callback_data=f"reqjoin_{category}")]]
+    await q.edit_message_text(
+        f"🔒 Access to *{category}* requires joining the channel.\n"
+        "Click the button below to request access.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+async def request_join_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    category = q.data.split("_", 1)[1]
+
+    # Track that user clicked the request
+    force_requested[user_id] = category
+
+    fsub_link = get_config("fsub") or "https://t.me/yourchannel"
+    kb = [
+        [InlineKeyboardButton("📩 Request to Join Channel", url=fsub_link)],
+        [InlineKeyboardButton("🔁 I've requested — Get Videos", callback_data=f"force_{category}_0")]
+    ]
+    await q.edit_message_text(
+        f"✅ Request noted! Now click the 'I've requested' button below to receive videos for *{category}*.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+async def force_sub_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    parts = q.data.split("_")
+    category = parts[1]
+
+    # Only allow if user clicked "Request to Join Channel"
+    if force_requested.get(user_id) != category:
+        await q.answer("⚠️ You need to request to join first.", show_alert=True)
+        return
+
+    # Reset the request state
+    force_requested.pop(user_id, None)
 
     all_videos = get_videos_by_category(category)
     if not all_videos:
@@ -235,31 +215,14 @@ async def category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                InlineKeyboardButton("Next ➡️", callback_data=f"next_{category}_{page}")]]
     await context.bot.send_message(chat_id=user_id, text="Navigate:", reply_markup=InlineKeyboardMarkup(nav_kb))
 
-async def verifynow_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    user_id = q.from_user.id
-    parts = q.data.split("_")
-    category = parts[1] if len(parts) > 1 else "General"
-
-    if await check_fsub_user(context.application, user_id):
-        await q.edit_message_text("✅ Verified! Sending videos...")
-        await category_cb(update, context)
-    else:
-        await q.answer("❌ Still not verified. Make sure you joined the channel.", show_alert=True)
-
 async def nav_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_fsub(update, context):
-        return
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
     direction, category, page = q.data.split("_")
     page = int(page)
-    if direction == "next":
-        page += 1
-    else:
-        page = max(page - 1, 0)
+    page = page + 1 if direction == "next" else max(page - 1, 0)
+
     all_videos = get_videos_by_category(category)
     chunk = paginate_list(all_videos, page, 10)
     if not chunk:
@@ -354,14 +317,12 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        return
+        return await update.message.reply_text("⛔ Unauthorized.")
     if not context.args:
-        return await update.message.reply_text("Usage: /fsub <link_or_channel_id>")
+        return await update.message.reply_text("Usage: /fsub <private_channel_link>")
     link = context.args[0]
     set_config("fsub", link)
-    cur.execute("UPDATE users SET verified=0")  # reset verification
-    conn.commit()
-    await update.message.reply_text(f"✅ Force-sub channel set: {link}\nOld verifications cleared.")
+    await update.message.reply_text(f"✅ Force-sub channel updated: {link}")
 
 # --- App bootstrap ---
 def build_app():
@@ -370,7 +331,8 @@ def build_app():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(age_confirm_cb, pattern="^age_confirm$"))
     app.add_handler(CallbackQueryHandler(category_cb, pattern="^cat_"))
-    app.add_handler(CallbackQueryHandler(verifynow_cb, pattern="^verifynow_"))
+    app.add_handler(CallbackQueryHandler(request_join_cb, pattern="^reqjoin_"))
+    app.add_handler(CallbackQueryHandler(force_sub_cb, pattern="^force_"))
     app.add_handler(CallbackQueryHandler(nav_cb, pattern="^(next|prev)_"))
     # admin
     app.add_handler(CommandHandler("addvideo", addvideo_cmd))
@@ -394,3 +356,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
