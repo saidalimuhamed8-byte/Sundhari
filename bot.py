@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
@@ -11,10 +12,11 @@ import asyncio
 
 # --- Environment Variables ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-APP_URL = os.environ["APP_URL"]
+APP_URL = os.environ["APP_URL"]  # Koyeb public URL
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
 
+# LOG_CHANNEL can be numeric ID or private link
 LOG_CHANNEL = os.environ.get("LOG_CHANNEL")
 if LOG_CHANNEL:
     try:
@@ -55,25 +57,20 @@ def paginate_videos(videos, page=0, page_size=10):
     end = start + page_size
     return videos[start:end]
 
-async def check_pending_request(app, user_id):
-    """Check if user has a pending join request in the private channel."""
-    global CHANNEL_TO_JOIN
+async def check_channel_membership(app, user_id):
+    """Check if user is already verified in DB or in channel."""
+    cursor.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if row and row[0] == 1:
+        return True
+
     if not CHANNEL_TO_JOIN:
         return True  # skip if channel not set
 
     try:
-        # Get chat administrators
-        admins = await app.bot.get_chat_administrators(CHANNEL_TO_JOIN)
-        # Only proceed if bot is admin
-        bot_is_admin = any(a.user.id == app.bot.id for a in admins)
-        if not bot_is_admin:
-            return False
-
-        # Use Telegram Bot API method getChatMember for pending requests
-        # For pending requests, Telegram returns status 'pending'
-        member = await app.bot.get_chat_member(chat_id=CHANNEL_TO_JOIN, user_id=user_id)
-        if member.status == "pending":
-            # Mark user verified
+        # Only works if CHANNEL_TO_JOIN is numeric ID (bot must be admin there)
+        member = await app.bot.get_chat_member(chat_id=int(CHANNEL_TO_JOIN), user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
             cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
             conn.commit()
             return True
@@ -106,6 +103,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     await query.answer()
 
+    # Age confirmation
     if query.data == "confirm_age":
         cursor.execute("UPDATE users SET age_confirmed=1 WHERE user_id=?", (user_id,))
         conn.commit()
@@ -120,17 +118,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Select the category:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # Category selection & channel verification
     if query.data.startswith("category_"):
         category = query.data.split("_")[1]
 
-        # check pending request
-        cursor.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-        verified = row and row[0] == 1
-        if not verified:
-            verified = await check_pending_request(context.application, user_id)
-
-        if not verified:
+        joined = await check_channel_membership(context.application, user_id)
+        if not joined:
             link = CHANNEL_TO_JOIN or "https://t.me/yourchannel"
             keyboard = [[InlineKeyboardButton("Request to Join Channel", url=link)]]
             await query.edit_message_text(
@@ -138,9 +131,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
-
-        cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
-        conn.commit()
 
         cursor.execute("SELECT file_id FROM videos WHERE category=?", (category,))
         all_videos = [v[0] for v in cursor.fetchall()]
@@ -165,6 +155,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="Navigation:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
+    # Pagination
     if query.data.startswith("next_") or query.data.startswith("prev_"):
         _, category, page = query.data.split("_")
         page = int(page)
@@ -207,8 +198,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text("Restarting bot...")
-    os._exit(1)
+
+    msg = "Restarting bot..."
+    if LOG_CHANNEL:
+        try:
+            await context.bot.send_message(LOG_CHANNEL, f"Bot is restarting by admin {ADMIN_ID}")
+        except:
+            pass
+    await update.message.reply_text(msg)
+
+    sys.exit(0)  # clean exit, Koyeb restarts
 
 # --- Set private channel link dynamically ---
 async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,22 +215,30 @@ async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /fsub <channel_link>")
+        await update.message.reply_text("Usage: /fsub <channel_id_or_link>")
         return
     CHANNEL_TO_JOIN = context.args[0]
-    # Clear old verified users
+
+    # Clear verified users when channel changes
     cursor.execute("UPDATE users SET verified=0")
     conn.commit()
-    await update.message.reply_text(f"Channel link updated to: {CHANNEL_TO_JOIN} and old verified users cleared.")
+
+    await update.message.reply_text(f"Channel link updated to: {CHANNEL_TO_JOIN}\nOld verifications cleared.")
 
 # --- Main ---
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("restart", restart))
     app.add_handler(CommandHandler("fsub", fsub))
+
+    # Button callbacks
     app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
