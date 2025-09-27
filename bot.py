@@ -1,26 +1,22 @@
 import os
 import sqlite3
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-import asyncio
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Environment Variables ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-APP_URL = os.environ["APP_URL"]  # Koyeb public URL
+APP_URL = os.environ["APP_URL"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
-CHANNEL_TO_JOIN = int(os.environ.get("CHANNEL_TO_JOIN"))  # private channel ID, must be -100...
 
 LOG_CHANNEL = os.environ.get("LOG_CHANNEL")
 try:
     LOG_CHANNEL = int(LOG_CHANNEL)
 except:
     LOG_CHANNEL = None
+
+# Dynamic channel link
+CHANNEL_LINK = None  # Initially None
 
 # --- Database Setup ---
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -41,19 +37,22 @@ CREATE TABLE IF NOT EXISTS videos(
     category TEXT
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS channel_requests(
+    user_id INTEGER UNIQUE
+)
+""")
 conn.commit()
 
 # --- Helper Functions ---
-async def check_channel_membership(app, user_id):
-    """Check if user has joined private channel."""
-    try:
-        member = await app.bot.get_chat_member(chat_id=CHANNEL_TO_JOIN, user_id=user_id)
-        if member.status in ['member', 'administrator', 'creator']:
-            return True
-    except Exception as e:
-        print(f"Membership check failed: {e}")
-        return False
-    return False
+async def check_channel_membership(user_id):
+    """Check if user already requested access (we can’t verify private channel membership via API)."""
+    if not CHANNEL_LINK:
+        return True  # Skip check if no channel set
+
+    cursor.execute("SELECT 1 FROM channel_requests WHERE user_id=?", (user_id,))
+    return bool(cursor.fetchone())
 
 def paginate_videos(videos, page=0, page_size=10):
     start = page * page_size
@@ -66,7 +65,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (user_id,))
     conn.commit()
 
-    # Log user start safely
     if LOG_CHANNEL:
         try:
             await context.bot.send_message(LOG_CHANNEL, f"User started bot: {user_id}")
@@ -101,20 +99,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Select the category:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # --- Category Selection & Channel Join ---
+    # --- Category Selection ---
     if query.data.startswith("category_"):
         category = query.data.split("_")[1]
+        joined = await check_channel_membership(user_id)
 
-        joined = await check_channel_membership(context.application, user_id)
         if not joined:
-            keyboard = [[InlineKeyboardButton("Request to Join Channel", url=f"https://t.me/c/{str(CHANNEL_TO_JOIN)[4:]}")]]
+            # Record request
+            cursor.execute("INSERT OR IGNORE INTO channel_requests(user_id) VALUES(?)", (user_id,))
+            conn.commit()
+
+            keyboard = [[InlineKeyboardButton("Request to Join Channel", url=CHANNEL_LINK)]]
             await query.edit_message_text(
-                f"To access {category} videos, you must request to join the private channel first.",
+                f"To access {category} videos, please request to join the private channel first.",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
 
-        # User verified, send first 10 videos
+        # Send videos
         cursor.execute("SELECT file_id FROM videos WHERE category=?", (category,))
         all_videos = [v[0] for v in cursor.fetchall()]
         if not all_videos:
@@ -182,21 +184,38 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     await update.message.reply_text("Restarting bot...")
-    os._exit(1)  # Koyeb will restart instance
+    os._exit(1)
+
+# --- Dynamic Channel Link ---
+async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global CHANNEL_LINK
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("You are not authorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /fsub <channel_link>")
+        return
+
+    try:
+        CHANNEL_LINK = context.args[0]
+        cursor.execute("DELETE FROM channel_requests")
+        conn.commit()
+        await update.message.reply_text(f"Channel updated successfully to {CHANNEL_LINK}. All previous requests cleared.")
+    except Exception as e:
+        await update.message.reply_text(f"Failed to set channel: {e}")
 
 # --- Main ---
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("restart", restart))
+    app.add_handler(CommandHandler("fsub", fsub))
 
-    # Button callbacks
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
