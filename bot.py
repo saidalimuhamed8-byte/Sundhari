@@ -1,159 +1,141 @@
 import os
-import sys
 import logging
-import aiosqlite
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
-from telegram.error import BadRequest
 
-# --- Config ---
-TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "YOUR_WEBHOOK_URL")
-ADMIN_ID = 5409412733
-LOG_CHANNEL = -1002871565651
-DB_PATH = "bot.db"
+# ---------------- Config ---------------- #
+TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+PORT = int(os.environ.get("PORT", 8000))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Replace or set in env
 
-# --- Logging ---
+# ---------------- Logging ---------------- #
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# --- Helper functions ---
-async def get_force_channel():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM config WHERE key='force_channel'") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
+# ---------------- Database ---------------- #
+DB_FILE = "bot.db"
 
-async def set_force_channel(channel):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO config(key, value) VALUES('force_channel', ?)", (channel,))
-        await db.commit()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
+    c.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
 
-async def add_user(user_id, username):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users(user_id, username) VALUES(?, ?)", (user_id, username)
-        )
-        await db.commit()
+def add_user(user_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
 
-async def get_total_users():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            row = await cursor.fetchone()
-            return row[0]
+def get_user_count():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
-# --- Handlers ---
+def set_channel(channel: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('channel', ?)", (channel,))
+    conn.commit()
+    conn.close()
+
+def get_channel():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='channel'")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+# ---------------- Handlers ---------------- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await add_user(user.id, user.username)
+    user_id = update.effective_user.id
+    add_user(user_id)
 
-    # Log first-time user
-    await context.bot.send_message(LOG_CHANNEL, f"👤 User started bot: {user.first_name} (@{user.username})")
-
-    # Check force channel
-    force_channel = await get_force_channel()
-    if force_channel:
-        try:
-            member = await context.bot.get_chat_member(force_channel, user.id)
-            if member.status in ["left", "kicked"]:
-                await update.message.reply_text(
-                    f"⚠️ You must join the channel {force_channel} first to use this bot."
-                )
-                return
-        except BadRequest:
-            await update.message.reply_text(f"⚠️ Force channel {force_channel} is invalid.")
-            return
-
-    # Age verification
     keyboard = [
-        [InlineKeyboardButton("✅ I am 18+", callback_data="age_verified")],
-        [InlineKeyboardButton("❌ Under 18", callback_data="under_18")]
+        [InlineKeyboardButton("✅ Yes, I’m 18+", callback_data="age_yes")],
+        [InlineKeyboardButton("❌ No", callback_data="age_no")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("⚠️ You must be 18+ to use this bot. Please verify:", reply_markup=reply_markup)
+    await update.message.reply_text("🔞 Are you 18+?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "age_verified":
+    if query.data == "age_yes":
         keyboard = [
-            [InlineKeyboardButton("🏝 Mallu", callback_data="category_mallu"),
-             InlineKeyboardButton("🇮🇳 Desi", callback_data="category_desi")],
-            [InlineKeyboardButton("🔥 Trending", callback_data="category_trending"),
-             InlineKeyboardButton("🆕 Latest", callback_data="category_latest")],
-            [InlineKeyboardButton("💎 Premium", callback_data="category_premium")]
+            [InlineKeyboardButton("🔥 Mallu", callback_data="cat_mallu")],
+            [InlineKeyboardButton("💃 Desi", callback_data="cat_desi")],
+            [InlineKeyboardButton("📈 Trending", callback_data="cat_trending")],
+            [InlineKeyboardButton("🆕 Latest", callback_data="cat_latest")],
+            [InlineKeyboardButton("⭐ Premium", callback_data="cat_premium")],
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("✅ Age verified!\n\nPlease select a category:", reply_markup=reply_markup)
-
-    elif query.data == "under_18":
+        await query.edit_message_text("Choose your category:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif query.data == "age_no":
         await query.edit_message_text("❌ You must be 18+ to use this bot.")
+    elif query.data.startswith("cat_"):
+        await query.edit_message_text(f"✅ You chose: {query.data.split('_')[1].title()}")
 
-    elif query.data.startswith("category_"):
-        category = query.data.split("_")[1].capitalize()
-        await query.edit_message_text(f"🎯 You selected: {category}\nContent coming soon!")
-
-# --- Admin Commands ---
-async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------- Admin Commands ---------------- #
+async def setchannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ You are not authorized.")
-        return
-    await update.message.reply_text("🔄 Restarting bot...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ You are not authorized.")
-        return
-    total_users = await get_total_users()
-    await update.message.reply_text(f"👥 Total users: {total_users}")
-
-async def setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ You are not authorized.")
-        return
+        return await update.message.reply_text("🚫 Not authorized")
     if not context.args:
-        await update.message.reply_text("Usage: /setchannel <channel_username_or_id>")
-        return
+        return await update.message.reply_text("Usage: /setchannel <channel_username_or_id>")
     channel = context.args[0]
-    await set_force_channel(channel)
-    await update.message.reply_text(f"✅ Force channel set to: {channel}")
+    set_channel(channel)
+    await update.message.reply_text(f"✅ Force-subscription channel set to: {channel}")
 
-# --- Main Function ---
-async def main():
-    # Initialize DB tables
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)""")
-        await db.execute("""CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)""")
-        await db.commit()
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("🚫 Not authorized")
+    count = get_user_count()
+    await update.message.reply_text(f"📊 Total users: {count}")
 
-    app = ApplicationBuilder().token(TOKEN).build()
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("🚫 Not authorized")
+    await update.message.reply_text("🔄 Restarting...")
+    os._exit(0)  # Heroku/Koyeb will auto-restart the dyno
 
-    # Command handlers
+# ---------------- Main ---------------- #
+def main():
+    init_db()
+    app = Application.builder().token(TOKEN).build()
+
+    # User commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("restart", restart))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("setchannel", setchannel))
-
-    # Callback buttons
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Webhook
-    await app.run_webhook(
+    # Admin commands
+    app.add_handler(CommandHandler("setchannel", setchannel_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("restart", restart_cmd))
+
+    # Start webhook
+    app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
-        webhook_url=f"{WEBHOOK_URL}{TOKEN}"
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
     )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
