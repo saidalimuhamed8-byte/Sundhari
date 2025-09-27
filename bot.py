@@ -11,17 +11,15 @@ import asyncio
 
 # --- Environment Variables ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-APP_URL = os.environ["APP_URL"]  # Koyeb public URL
+APP_URL = os.environ["APP_URL"]
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
 
-# LOG_CHANNEL can be numeric ID or private link
 LOG_CHANNEL = os.environ.get("LOG_CHANNEL")
 if LOG_CHANNEL:
     try:
         LOG_CHANNEL = int(LOG_CHANNEL)
     except ValueError:
-        # keep as string if not numeric
         pass
 else:
     LOG_CHANNEL = None
@@ -37,7 +35,8 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS users(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER UNIQUE,
-    age_confirmed INTEGER DEFAULT 0
+    age_confirmed INTEGER DEFAULT 0,
+    verified INTEGER DEFAULT 0
 )
 """)
 
@@ -56,16 +55,27 @@ def paginate_videos(videos, page=0, page_size=10):
     end = start + page_size
     return videos[start:end]
 
-async def check_channel_membership(app, user_id):
-    """Check if user is already in the private channel."""
+async def check_pending_request(app, user_id):
+    """Check if user has a pending join request in the private channel."""
+    global CHANNEL_TO_JOIN
     if not CHANNEL_TO_JOIN:
-        return True  # skip if channel not set yet
+        return True  # skip if channel not set
+
     try:
-        # Attempt to get member using numeric ID if link is numeric
-        if CHANNEL_TO_JOIN.startswith("https://t.me/"):
-            return False  # cannot check private link dynamically
-        member = await app.bot.get_chat_member(chat_id=int(CHANNEL_TO_JOIN), user_id=user_id)
-        if member.status in ["member", "administrator", "creator"]:
+        # Get chat administrators
+        admins = await app.bot.get_chat_administrators(CHANNEL_TO_JOIN)
+        # Only proceed if bot is admin
+        bot_is_admin = any(a.user.id == app.bot.id for a in admins)
+        if not bot_is_admin:
+            return False
+
+        # Use Telegram Bot API method getChatMember for pending requests
+        # For pending requests, Telegram returns status 'pending'
+        member = await app.bot.get_chat_member(chat_id=CHANNEL_TO_JOIN, user_id=user_id)
+        if member.status == "pending":
+            # Mark user verified
+            cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
+            conn.commit()
             return True
     except:
         return False
@@ -77,7 +87,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (user_id,))
     conn.commit()
 
-    # Log safely
     if LOG_CHANNEL:
         try:
             await context.bot.send_message(LOG_CHANNEL, f"User started bot: {user_id}")
@@ -97,7 +106,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     await query.answer()
 
-    # Age confirmation
     if query.data == "confirm_age":
         cursor.execute("UPDATE users SET age_confirmed=1 WHERE user_id=?", (user_id,))
         conn.commit()
@@ -112,13 +120,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Select the category:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # Category selection & channel verification
     if query.data.startswith("category_"):
         category = query.data.split("_")[1]
 
-        joined = await check_channel_membership(context.application, user_id)
-        if not joined:
-            # send channel request link dynamically
+        # check pending request
+        cursor.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        verified = row and row[0] == 1
+        if not verified:
+            verified = await check_pending_request(context.application, user_id)
+
+        if not verified:
             link = CHANNEL_TO_JOIN or "https://t.me/yourchannel"
             keyboard = [[InlineKeyboardButton("Request to Join Channel", url=link)]]
             await query.edit_message_text(
@@ -127,7 +139,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # User verified, send first 10 videos
+        cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
+        conn.commit()
+
         cursor.execute("SELECT file_id FROM videos WHERE category=?", (category,))
         all_videos = [v[0] for v in cursor.fetchall()]
         if not all_videos:
@@ -151,7 +165,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="Navigation:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # Pagination
     if query.data.startswith("next_") or query.data.startswith("prev_"):
         _, category, page = query.data.split("_")
         page = int(page)
@@ -206,22 +219,19 @@ async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /fsub <channel_link>")
         return
     CHANNEL_TO_JOIN = context.args[0]
-    await update.message.reply_text(f"Channel link updated to: {CHANNEL_TO_JOIN}")
+    # Clear old verified users
+    cursor.execute("UPDATE users SET verified=0")
+    conn.commit()
+    await update.message.reply_text(f"Channel link updated to: {CHANNEL_TO_JOIN} and old verified users cleared.")
 
 # --- Main ---
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("restart", restart))
-    app.add_handler(CommandHandler("fsub", fsub))  # set private channel link dynamically
-
-    # Button callbacks
+    app.add_handler(CommandHandler("fsub", fsub))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
