@@ -12,7 +12,7 @@ from telegram.ext import (
 
 # --- Environment Variables ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-APP_URL = os.environ["APP_URL"]  # Your Koyeb URL, e.g., https://mybot.koyeb.app
+APP_URL = os.environ["APP_URL"]  # Your Koyeb URL
 PORT = int(os.environ.get("PORT", 8000))
 
 # --- Database Setup ---
@@ -38,15 +38,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("This is a help message!")
 
-# Example button handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(text=f"Selected option: {query.data}")
 
 # --- Main ---
-async def main():
-    # Create application
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Add handlers
@@ -54,14 +52,13 @@ async def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Run webhook (no /TOKEN in URL)
-    await app.run_webhook(
+    # Run webhook without asyncio.run()
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path="",           # No token in webhook path
+        url_path="",           # No token in URL
         webhook_url=APP_URL,   # Full public URL
     )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
